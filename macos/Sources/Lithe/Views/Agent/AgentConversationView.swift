@@ -258,7 +258,7 @@ private struct AgentConnectionView: View {
                     onSelectAgent: onSelectAgent,
                     onOpenSettings: onOpenSettings,
                     onError: { localError = $0 },
-                    configOptions: feature.selectedConversation?.configOptions ?? [],
+                    configOptions: feature.selectedConversation?.displayConfigOptions ?? [],
                     sessionID: feature.selectedSessionID,
                     isPreparingSession: isPreparingSession,
                     isConfiguring: feature.selectedConversation?.pendingConfigToken != nil,
