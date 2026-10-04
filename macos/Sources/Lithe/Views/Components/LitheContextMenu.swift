@@ -17,11 +17,15 @@ enum LitheDropdownMetrics {
     static let separatorHeight: CGFloat = 11
     static let verticalPadding: CGFloat = 2 * popupPadding
     static let submenuSpacing: CGFloat = 1
+    static let descriptionFontSize: CGFloat = 11
+    static let descriptionSpacing: CGFloat = 2
+    static let descriptionVerticalPadding: CGFloat = 4
 }
 
 /// The Project dropdown row chrome, also used by searchable filter lists.
 struct LitheDropdownRowStyle: ButtonStyle {
     var isSelected = false
+    var tracksHover = true
     @State private var isHovered = false
     @Environment(\.isEnabled) private var isEnabled
 
@@ -38,7 +42,7 @@ struct LitheDropdownRowStyle: ButtonStyle {
                     .fill(highlighted ? LitheTheme.settingsSelection : .clear)
             }
             .contentShape(Rectangle())
-            .onHover { isHovered = $0 }
+            .onHover { if tracksHover, isHovered != $0 { isHovered = $0 } }
     }
 }
 
@@ -57,6 +61,8 @@ struct LitheContextMenuItem: Identifiable {
     let id = UUID()
     let kind: Kind
     let title: String
+    var localizesTitle = true
+    var description: String? = nil
     let systemImage: String?
     let iconKind: LitheIconKind?
     var icon: AnyView? = nil
@@ -68,6 +74,8 @@ struct LitheContextMenuItem: Identifiable {
 
     static func action(
         _ title: String,
+        localizesTitle: Bool = true,
+        description: String? = nil,
         systemImage: String? = nil,
         iconKind: LitheIconKind? = nil,
         icon: AnyView? = nil,
@@ -80,6 +88,8 @@ struct LitheContextMenuItem: Identifiable {
         Self(
             kind: .action,
             title: title,
+            localizesTitle: localizesTitle,
+            description: description,
             systemImage: systemImage,
             iconKind: iconKind,
             icon: icon,
@@ -128,6 +138,7 @@ private final class LitheContextMenuSelection: ObservableObject {
     @Published var openSubmenuID: UUID?
     @Published var childID: UUID?
     var inSubmenu = false
+    var usesKeyboardNavigation = false
     let items: [LitheContextMenuItem]
     let dismiss: () -> Void
     @Published var submenuOffset: CGFloat = 0
@@ -172,6 +183,7 @@ private final class LitheContextMenuSelection: ObservableObject {
         let current = inSubmenu ? childID : selectedID
         switch event.keyCode {
         case 125, 126: // Down / Up
+            usesKeyboardNavigation = true
             guard !enabled.isEmpty else { return true }
             let index = enabled.firstIndex { $0.id == current }
             let next = index.map { ($0 + (event.keyCode == 125 ? 1 : enabled.count - 1)) % enabled.count }
@@ -179,6 +191,7 @@ private final class LitheContextMenuSelection: ObservableObject {
             if inSubmenu { childID = enabled[next].id }
             else { open(nil); selectedID = enabled[next].id }
         case 124, 36, 76: // Right / Return / keypad Enter
+            usesKeyboardNavigation = true
             guard let item = activeItems.first(where: { $0.id == current }), item.isEnabled else { return true }
             if case .submenu = item.kind {
                 open(item.id)
@@ -189,6 +202,7 @@ private final class LitheContextMenuSelection: ObservableObject {
                 item.action()
             }
         case 123: // Left
+            usesKeyboardNavigation = true
             open(nil)
         case 53:
             if openSubmenuID != nil { open(nil) } else { dismiss() }
@@ -206,6 +220,7 @@ private struct LitheContextMenuRowFrames: PreferenceKey {
 }
 
 private struct LitheContextMenuContent: View {
+    @Environment(\.locale) private var locale
     @ObservedObject var selection: LitheContextMenuSelection
     let width: CGFloat
     let submenuWidth: CGFloat
@@ -249,11 +264,15 @@ private struct LitheContextMenuContent: View {
                                     else { selection.dismiss(); item.action() }
                                 },
                                 onHover: { hovering in
-                                    guard hovering, item.isEnabled else { return }
+                                    // Scrolling under a stationary pointer synthesizes hover.
+                                    // Keep the keyboard's choice until the pointer actually moves.
+                                    guard hovering, !selection.usesKeyboardNavigation, item.isEnabled else { return }
                                     selection.inSubmenu = isChild
-                                    if isChild { selection.childID = item.id }
+                                    if isChild {
+                                        if selection.childID != item.id { selection.childID = item.id }
+                                    }
                                     else {
-                                        selection.selectedID = item.id
+                                        if selection.selectedID != item.id { selection.selectedID = item.id }
                                         if case .submenu = item.kind { selection.open(item.id) }
                                         else { selection.open(nil) }
                                     }
@@ -277,7 +296,7 @@ private struct LitheContextMenuContent: View {
                 if let id { proxy.scrollTo(id) }
             }
         }
-        .frame(width: width, height: min(LitheContextMenuPresenter.menuHeight(for: items), maximumHeight))
+        .frame(width: width, height: min(LitheContextMenuPresenter.menuHeight(for: items, width: width, locale: locale), maximumHeight))
         .litheContextMenuSurface()
     }
 }
@@ -332,13 +351,21 @@ private struct LitheContextMenuRow: View {
                     .foregroundStyle(isHovering ? LitheTheme.settingsSelectionText : LitheTheme.secondaryText)
                 }
 
-                Text(LocalizedStringKey(item.title))
-                    .font(LitheTheme.uiFont(size: LitheDropdownMetrics.fontSize))
-                    .foregroundStyle(isHovering
-                                     ? LitheTheme.settingsSelectionText
-                                     : LitheTheme.primaryText)
-                    .lineLimit(1)
-                    .padding(.trailing, 9)
+                VStack(alignment: .leading, spacing: LitheDropdownMetrics.descriptionSpacing) {
+                    title
+                        .font(LitheTheme.uiFont(size: LitheDropdownMetrics.fontSize))
+                        .foregroundStyle(isHovering ? LitheTheme.settingsSelectionText : LitheTheme.primaryText)
+                        .lineLimit(1)
+                    if let description = item.description, !description.isEmpty {
+                        Text(verbatim: description)
+                            .font(LitheTheme.uiFont(size: LitheDropdownMetrics.descriptionFontSize))
+                            .foregroundStyle(isHovering ? LitheTheme.settingsSelectionText.opacity(0.78) : LitheTheme.secondaryText)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.trailing, 9)
+                .padding(.vertical, item.description?.isEmpty == false ? LitheDropdownMetrics.descriptionVerticalPadding : 0)
 
                 Spacer(minLength: 14)
 
@@ -362,22 +389,31 @@ private struct LitheContextMenuRow: View {
                 }
             }
         }
-        .buttonStyle(LitheDropdownRowStyle(isSelected: isSelected))
+        .buttonStyle(LitheDropdownRowStyle(isSelected: isSelected, tracksHover: false))
         .padding(.horizontal, LitheDropdownMetrics.popupPadding)
         .disabled(!item.isEnabled)
         .opacity(item.isEnabled ? 1 : 0.45)
-        .onHover { hovering in
-            onSubmenuHover?(hovering)
+        .onContinuousHover { phase in
+            switch phase {
+            case .active: onSubmenuHover?(true)
+            case .ended: onSubmenuHover?(false)
+            }
         }
+    }
+
+    private var title: Text {
+        item.localizesTitle ? Text(LocalizedStringKey(item.title)) : Text(verbatim: item.title)
     }
 }
 
 @MainActor
 private final class LitheContextMenuPanel: NSPanel {
     var handleKey: ((NSEvent) -> Bool)?
+    var handleMouseMoved: (() -> Void)?
     override var canBecomeKey: Bool { true }
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, handleKey?(event) == true { return }
+        if event.type == .mouseMoved { handleMouseMoved?() }
         super.sendEvent(event)
     }
 }
@@ -425,7 +461,7 @@ final class LitheContextMenuPresenter: NSObject, NSWindowDelegate {
             ?? NSScreen.main?.visibleFrame ?? .zero
         self.visibleFrame = visibleFrame.insetBy(dx: 6, dy: 6)
         let maximumHeight = max(1, visibleFrame.height - 12)
-        let menuHeight = min(Self.menuHeight(for: items), maximumHeight)
+        let menuHeight = min(Self.menuHeight(for: items, width: menuWidth, locale: locale), maximumHeight)
         let submenuWidths = items.compactMap { item -> CGFloat? in
             guard case .submenu(let submenuItems) = item.kind else { return nil }
             return Self.menuWidth(for: submenuItems, locale: locale)
@@ -459,7 +495,7 @@ final class LitheContextMenuPresenter: NSObject, NSWindowDelegate {
             self?.resizeMenu(
                 offset: offset, rootFrame: NSRect(origin: origin, size: NSSize(width: menuWidth, height: menuHeight)),
                 submenuWidth: submenuWidth,
-                submenuHeight: min(Self.menuHeight(for: selection?.children ?? []), maximumHeight),
+                submenuHeight: min(Self.menuHeight(for: selection?.children ?? [], width: submenuWidth, locale: locale), maximumHeight),
                 submenuOnLeft: submenuOnLeft
             ) ?? 0
         }
@@ -471,6 +507,8 @@ final class LitheContextMenuPresenter: NSObject, NSWindowDelegate {
 
         let panel = makePanel(contentController: NSHostingController(rootView: content), appearance: appearance)
         panel.handleKey = { selection.handle($0) }
+        panel.acceptsMouseMovedEvents = true
+        panel.handleMouseMoved = { selection.usesKeyboardNavigation = false }
 
         // Installing the hosting controller can reset the initial content size.
         panel.setFrame(NSRect(origin: origin, size: NSSize(width: menuWidth, height: menuHeight)), display: true)
@@ -633,13 +671,22 @@ final class LitheContextMenuPresenter: NSObject, NSWindowDelegate {
         )
     }
 
-    fileprivate static func menuHeight(for items: [LitheContextMenuItem]) -> CGFloat {
-        items.reduce(LitheDropdownMetrics.verticalPadding) { height, item in
+    fileprivate static func menuHeight(for items: [LitheContextMenuItem], width: CGFloat, locale: Locale) -> CGFloat {
+        let showsIcons = items.contains { $0.systemImage != nil || $0.iconKind != nil || $0.icon != nil }
+        return items.reduce(LitheDropdownMetrics.verticalPadding) { height, item in
             switch item.kind {
             case .separator:
-                height + LitheDropdownMetrics.separatorHeight
+                return height + LitheDropdownMetrics.separatorHeight
             case .action, .submenu:
-                height + LitheDropdownMetrics.rowHeight
+                guard item.description?.isEmpty == false else { return height + LitheDropdownMetrics.rowHeight }
+                // Measure the rendered two-line label at the same bounded width
+                // as its menu, so wrapped descriptions remain inside the panel.
+                let renderer = ImageRenderer(content: LitheContextMenuRow(
+                    item: item, isSelected: false, showsIcons: showsIcons, action: {}
+                ).frame(width: width).environment(\.locale, locale))
+                var rowHeight = LitheDropdownMetrics.rowHeight
+                renderer.render { size, _ in rowHeight = max(rowHeight, ceil(size.height)) }
+                return height + rowHeight
             }
         }
     }
@@ -648,11 +695,17 @@ final class LitheContextMenuPresenter: NSObject, NSWindowDelegate {
         // Measure the same localized SwiftUI font that the row renders. Native
         // font advances differ at fractional sizes and caused ordinary titles
         // to truncate. render supplies layout size; no bitmap needs drawing.
-        let renderer = ImageRenderer(content: Text(LocalizedStringKey(item.title))
+        let title = item.localizesTitle ? Text(LocalizedStringKey(item.title)) : Text(verbatim: item.title)
+        let renderer = ImageRenderer(content: title
             .font(LitheTheme.uiFont(size: LitheDropdownMetrics.fontSize))
             .environment(\.locale, locale).fixedSize())
         var titleWidth: CGFloat = 0
         renderer.render { size, _ in titleWidth = size.width }
+        if let description = item.description, !description.isEmpty {
+            let renderer = ImageRenderer(content: Text(verbatim: description)
+                .font(LitheTheme.uiFont(size: LitheDropdownMetrics.descriptionFontSize)).fixedSize())
+            renderer.render { size, _ in titleWidth = max(titleWidth, size.width) }
+        }
         let shortcutWidth = item.shortcut.map {
             ($0 as NSString).size(
                 withAttributes: [.font: LitheDropdownMetrics.shortcutFont]
