@@ -154,8 +154,15 @@ Lithe 的名称下方说明按用户指定的 CC GUI 配置选项设计扩展，
 共享菜单在键盘导航后忽略这类事件，等面板收到真实鼠标移动才恢复指针选择；
 行样式只使用菜单选中状态，避免另一份本地 hover 把不同的行同时染蓝。
 连续指针事件只在选中 ID 改变时发布菜单局部状态，不通知业务页面。
+真实 `mouseMoved` 在同一事件内按已有布局测量的行矩形完成选择交接，不依赖
+后续 SwiftUI 悬停回调的先后顺序。指针矩形只保存在打开的菜单内，布局没有变化
+不重复保存；不发布业务状态，也不写入磁盘或缓存窗口位置。
 `AgentSessionSelectorLayoutTests.modelSettingsWithWrappedDescriptionsScrollToTheLastChoice`
 在滚动完成并捕获真实渲染后再按 Return，验证末项没有被静止指针抢走。
+`AgentSessionSelectorInteractionTests` 另外向原生子窗口发送 `mouseMoved`，再按
+Return 验证指针所在行接回选择。动作菜单的内容是打开时的快照；接入动态上游配置
+的调用方需要在对应配置变化时拆除局部锚点，关闭失效子窗口，重新打开读取新选项。
+Agent 仅重建变化的设置行菜单，保持可搜索父面板和其他配置菜单的状态。
 
 ## 顶部项目和分支菜单的尺寸与内容
 

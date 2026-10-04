@@ -143,6 +143,7 @@ private final class LitheContextMenuSelection: ObservableObject {
     let dismiss: () -> Void
     @Published var submenuOffset: CGFloat = 0
     private var rowFrames: [UUID: CGRect] = [:]
+    private var pointerFrames: [UUID: CGRect] = [:]
     var layoutSubmenu: ((CGFloat?) -> CGFloat)?
 
     init(items: [LitheContextMenuItem], dismiss: @escaping () -> Void) {
@@ -167,6 +168,32 @@ private final class LitheContextMenuSelection: ObservableObject {
         guard rowFrames != frames else { return }
         rowFrames = frames
         if children != nil { updateSubmenuPlacement() }
+    }
+
+    func updatePointerFrames(_ frames: [UUID: CGRect]) {
+        if pointerFrames != frames { pointerFrames = frames }
+    }
+
+    func pointerMoved(to point: CGPoint) {
+        usesKeyboardNavigation = false
+        if let item = children?.first(where: { pointerFrames[$0.id]?.contains(point) == true }) {
+            hover(item, isChild: true)
+        } else if let item = items.first(where: { pointerFrames[$0.id]?.contains(point) == true }) {
+            hover(item, isChild: false)
+        }
+    }
+
+    func hover(_ item: LitheContextMenuItem, isChild: Bool) {
+        guard !usesKeyboardNavigation, item.isEnabled else { return }
+        if case .separator = item.kind { return }
+        inSubmenu = isChild
+        if isChild {
+            if childID != item.id { childID = item.id }
+        } else {
+            if selectedID != item.id { selectedID = item.id }
+            if case .submenu = item.kind { open(item.id) }
+            else { open(nil) }
+        }
     }
 
     private func updateSubmenuPlacement() {
@@ -219,6 +246,13 @@ private struct LitheContextMenuRowFrames: PreferenceKey {
     }
 }
 
+private struct LitheContextMenuPointerFrames: PreferenceKey {
+    static let defaultValue: [UUID: CGRect] = [:]
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+
 private struct LitheContextMenuContent: View {
     @Environment(\.locale) private var locale
     @ObservedObject var selection: LitheContextMenuSelection
@@ -242,7 +276,9 @@ private struct LitheContextMenuContent: View {
                     .padding(.top, selection.submenuOffset + topInset)
             }
         }
+        .coordinateSpace(name: "LithePointerMenu")
         .onPreferenceChange(LitheContextMenuRowFrames.self) { selection.updateRowFrames($0) }
+        .onPreferenceChange(LitheContextMenuPointerFrames.self) { selection.updatePointerFrames($0) }
     }
 
     private func menuColumn(_ items: [LitheContextMenuItem], width: CGFloat, isChild: Bool) -> some View {
@@ -266,25 +302,17 @@ private struct LitheContextMenuContent: View {
                                 onHover: { hovering in
                                     // Scrolling under a stationary pointer synthesizes hover.
                                     // Keep the keyboard's choice until the pointer actually moves.
-                                    guard hovering, !selection.usesKeyboardNavigation, item.isEnabled else { return }
-                                    selection.inSubmenu = isChild
-                                    if isChild {
-                                        if selection.childID != item.id { selection.childID = item.id }
-                                    }
-                                    else {
-                                        if selection.selectedID != item.id { selection.selectedID = item.id }
-                                        if case .submenu = item.kind { selection.open(item.id) }
-                                        else { selection.open(nil) }
-                                    }
+                                    if hovering { selection.hover(item, isChild: isChild) }
                                 }
                             )
                             .id(item.id)
                             .background {
-                                if !isChild {
-                                    GeometryReader { geometry in
-                                        Color.clear.preference(key: LitheContextMenuRowFrames.self,
-                                            value: [item.id: geometry.frame(in: .named("LitheRootMenu"))])
-                                    }
+                                GeometryReader { geometry in
+                                    Color.clear
+                                        .preference(key: LitheContextMenuRowFrames.self,
+                                            value: isChild ? [:] : [item.id: geometry.frame(in: .named("LitheRootMenu"))])
+                                        .preference(key: LitheContextMenuPointerFrames.self,
+                                            value: [item.id: geometry.frame(in: .named("LithePointerMenu"))])
                                 }
                             }
                         }
@@ -409,11 +437,11 @@ private struct LitheContextMenuRow: View {
 @MainActor
 private final class LitheContextMenuPanel: NSPanel {
     var handleKey: ((NSEvent) -> Bool)?
-    var handleMouseMoved: (() -> Void)?
+    var handleMouseMoved: ((NSEvent) -> Void)?
     override var canBecomeKey: Bool { true }
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, handleKey?(event) == true { return }
-        if event.type == .mouseMoved { handleMouseMoved?() }
+        if event.type == .mouseMoved { handleMouseMoved?(event) }
         super.sendEvent(event)
     }
 }
@@ -508,7 +536,12 @@ final class LitheContextMenuPresenter: NSObject, NSWindowDelegate {
         let panel = makePanel(contentController: NSHostingController(rootView: content), appearance: appearance)
         panel.handleKey = { selection.handle($0) }
         panel.acceptsMouseMovedEvents = true
-        panel.handleMouseMoved = { selection.usesKeyboardNavigation = false }
+        panel.handleMouseMoved = { [weak panel] event in
+            guard let content = panel?.contentView else { return }
+            // Complete pointer handoff in this event, without depending on a
+            // later SwiftUI hover callback after keyboard scrolling.
+            selection.pointerMoved(to: content.convert(event.locationInWindow, from: nil))
+        }
 
         // Installing the hosting controller can reset the initial content size.
         panel.setFrame(NSRect(origin: origin, size: NSSize(width: menuWidth, height: menuHeight)), display: true)

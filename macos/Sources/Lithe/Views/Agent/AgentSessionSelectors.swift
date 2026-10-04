@@ -260,6 +260,7 @@ struct AgentModelPopover: View {
 private struct AgentModelSettingRow: View {
     let option: AgentSessionConfigOption
     let onSelect: (String, String) -> Void
+    @State private var menuRevision = UUID()
 
     var body: some View {
         LitheMenu(opensToSide: true) {
@@ -280,6 +281,12 @@ private struct AgentModelSettingRow: View {
             }
             .frame(minHeight: LitheDropdownMetrics.rowHeight)
             .contentShape(Rectangle())
+        }
+        .id(menuRevision)
+        .onChange(of: option) { _ in
+            // Action menus retain an opening snapshot. Detach only this anchor
+            // when upstream changes it; keep the model panel and search alive.
+            menuRevision = UUID()
         }
         .lithePointer()
         .accessibilityIdentifier("agent-model-setting-\(option.id)")
