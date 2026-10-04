@@ -327,6 +327,7 @@ fn serialized_events_match_the_shared_fixture() {
         "claudeFileCreated",
         "claudeFileWriteUpdated",
         "sessionInfo",
+        "codexRetry",
         "usageUpdate",
         "agentThoughtChunk",
         "plan",

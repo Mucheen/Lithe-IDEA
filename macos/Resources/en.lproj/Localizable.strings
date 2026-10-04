@@ -1406,3 +1406,12 @@
 "The reported file changes have been updated. Review them again before rolling back." = "The reported file changes have been updated. Review them again before rolling back.";
 "Rollback could not restore the changed file. It remains at %@. Restore it manually before retrying." = "Rollback could not restore the changed file. It remains at %@. Restore it manually before retrying.";
 "Rollback could not verify the moved file. Check the Trash before retrying." = "Rollback could not verify the moved file. Check the Trash before retrying.";
+"Waiting for Agent response…" = "Waiting for Agent response…";
+
+"Preparing conversation…" = "Preparing conversation…";
+
+"Running tools…" = "Running tools…";
+
+"Waiting for permission…" = "Waiting for permission…";
+
+"Agent is retrying…" = "Agent is retrying…";

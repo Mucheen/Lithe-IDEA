@@ -98,6 +98,10 @@
       "kind": "update", "sessionId": "session-1",
       "update": { "sessionUpdate": "tool_call_update", "toolCallId": "write-update", "kind": "edit", "status": "completed", "content": [{ "type": "diff", "path": "updated.txt", "oldText": "before", "newText": "after" }], "_meta": { "claudeCode": { "toolName": "Write", "toolResponse": { "type": "update", "filePath": "updated.txt", "content": "after\n", "originalFile": "before\n", "structuredPatch": [] } } } }
     },
+    "codexRetry": {
+      "kind": "update", "sessionId": "session-1",
+      "update": { "sessionUpdate": "session_info_update", "_meta": { "codex": { "error": { "message": "Stream closed before completion; reconnecting.", "codexErrorInfo": null, "additionalDetails": null, "turnId": "upstream-turn-1", "willRetry": true } } } }
+    },
     "sessionInfo": {
       "kind": "update",
       "sessionId": "session-1",
