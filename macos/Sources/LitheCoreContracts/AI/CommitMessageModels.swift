@@ -473,10 +473,11 @@ public struct CommitMessageAISettings: Codable, Equatable, Sendable {
     }
 
     public mutating func addProvider() -> AIProviderProfile {
+        // This entry can switch protocols; only source-specific editors seed a model.
         let provider = AIProviderProfile(
             name: "Custom Provider",
             endpoint: "",
-            model: AIConfigurationSourceKind.codex.newProviderModel,
+            model: "",
             apiProtocol: .responses,
             requiresAPIKey: true
         )

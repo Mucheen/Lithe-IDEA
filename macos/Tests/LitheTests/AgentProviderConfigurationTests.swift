@@ -56,11 +56,42 @@ struct AgentProviderConfigurationTests {
     }
 
     @Test
-    func addingCommitMessageProviderUsesOfficialCodexModel() {
+    func addingGenericProviderRequiresAnExplicitModelAfterSwitchingToClaude() throws {
+        let settings = AppSettings(store: ProviderSettingsStore())
+        let providerID = settings.addAIProvider()
+        settings.updateAIProvider(providerID) {
+            $0.endpoint = "https://example.test/v1"
+            $0.apiProtocol = .anthropicMessages
+        }
+        settings.setAgentProvider(providerID, for: "claude-acp", name: "Claude")
+
+        let provider = try #require(settings.agentProvider(for: "claude-acp"))
+        #expect(provider.model.isEmpty)
+        #expect(!provider.isValid)
+        let feature = AgentProviderConfiguration(settings: settings, secureStore: ProviderSecureStore(),
+            parser: ProviderParser())
+        let draft = try feature.draft(source: .claude, provider: provider)
+        let json = try #require(JSONSerialization.jsonObject(with: Data(draft.configuration.utf8)) as? [String: Any])
+        let environment = try #require(json["env"] as? [String: String])
+        #expect(environment["ANTHROPIC_MODEL"] == "")
+    }
+
+    @Test(arguments: ["fixture-custom-model", "gpt-6.1-sol"])
+    func switchingGenericProviderProtocolKeepsManuallyEnteredModel(model: String) throws {
         var settings = CommitMessageAISettings.default
         let provider = settings.addProvider()
-        #expect(provider.model == "gpt-6.1-sol")
+        settings.updateActiveProvider { $0.model = model }
+        settings.updateActiveProvider { $0.apiProtocol = .anthropicMessages }
+        let selected = try #require(settings.activeProvider)
+        #expect(selected.model == model)
         #expect(settings.activeProviderID == provider.id)
+
+        let feature = AgentProviderConfiguration(settings: AppSettings(store: ProviderSettingsStore()),
+            secureStore: ProviderSecureStore(), parser: ProviderParser())
+        let draft = try feature.draft(source: .claude, provider: selected)
+        let json = try #require(JSONSerialization.jsonObject(with: Data(draft.configuration.utf8)) as? [String: Any])
+        let environment = try #require(json["env"] as? [String: String])
+        #expect(environment["ANTHROPIC_MODEL"] == model)
     }
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["LITHE_RUN_AGENT_PROVIDER_INTEGRATION"] == "1"))
