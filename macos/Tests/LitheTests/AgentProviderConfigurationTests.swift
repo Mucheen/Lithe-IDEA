@@ -38,6 +38,31 @@ struct AgentProviderConfigurationTests {
         editor.insertText(json, replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
         #expect(editor.string == json)
     }
+
+    @Test @MainActor
+    func newCodexDraftUsesOfficialModelAndEditingKeepsSavedModel() throws {
+        let settings = AppSettings(store: ProviderSettingsStore())
+        let keys = ProviderSecureStore()
+        let feature = AgentProviderConfiguration(settings: settings, secureStore: keys, parser: ProviderParser())
+
+        let newDraft = try feature.draft(source: .codex)
+        #expect(newDraft.configuration.contains("model = \"gpt-6.1-sol\""))
+
+        let saved = AIProviderProfile(name: "Saved", endpoint: "https://example.test/v1", model: "saved-model",
+            apiProtocol: .responses, apiKeyIdentifier: "saved-key")
+        let edit = try feature.draft(source: .codex, provider: saved)
+        #expect(edit.configuration.contains("model = \"saved-model\""))
+        #expect(!edit.configuration.contains("gpt-6.1-sol"))
+    }
+
+    @Test
+    func addingCommitMessageProviderUsesOfficialCodexModel() {
+        var settings = CommitMessageAISettings.default
+        let provider = settings.addProvider()
+        #expect(provider.model == "gpt-6.1-sol")
+        #expect(settings.activeProviderID == provider.id)
+    }
+
     @Test(.enabled(if: ProcessInfo.processInfo.environment["LITHE_RUN_AGENT_PROVIDER_INTEGRATION"] == "1"))
     func nativeParserUsesSharedFixtureAndRoundTripsEditorTemplates() throws {
         let fixtureURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
