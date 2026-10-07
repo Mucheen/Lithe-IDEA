@@ -8,6 +8,7 @@
 
 pub mod catalog;
 pub mod cli_update;
+mod codex_retry;
 pub mod environment;
 pub mod install;
 mod prompt;
@@ -166,6 +167,8 @@ struct GatewaySignIn {
     headers: Vec<(String, String)>,
     provider_name: Option<String>,
     model: Option<String>,
+    /// Bounded native Codex recovery, with a pre-work HTTP 429 fallback.
+    native_recovery: bool,
 }
 
 /// A validated launch: what to run and how the key reaches the agent.
@@ -216,6 +219,7 @@ fn resolve_with(
     }
     // Credentials travel over ACP stdio. Claude uses its public session options
     // because its gateway mode adds a conflicting placeholder Bearer token.
+    let native_recovery = launch.agent_id.as_deref() == Some("codex-acp");
     let gateway = |provider: &ProviderCredentials| -> Result<GatewaySignIn, String> {
         let (base_url, header) = match provider.protocol {
             ProviderProtocol::AnthropicMessages => (
@@ -236,6 +240,7 @@ fn resolve_with(
             headers: vec![header],
             provider_name: provider.name.clone(),
             model: provider.model.clone(),
+            native_recovery,
         })
     };
     let Some(agent_id) = launch.agent_id else {
@@ -696,10 +701,28 @@ async fn run_agent(
     emit: Emit,
 ) -> Result<(), String> {
     let cancelled = || stop_requested.load(Ordering::Acquire);
-    let launch = resolve_with_cancel(launch, &cancelled)?;
+    let mut launch = resolve_with_cancel(launch, &cancelled)?;
     if cancelled() {
         return Err("Agent launch was cancelled".into());
     }
+    let _relay = if launch
+        .gateway
+        .as_ref()
+        .is_some_and(|route| route.native_recovery)
+    {
+        let executable = launch
+            .env
+            .iter()
+            .find(|(name, _)| name == "CODEX_PATH")
+            .map(|(_, value)| PathBuf::from(value))
+            .ok_or("Codex executable is unavailable")?;
+        let (relay, env) = codex_retry::Relay::create(&executable)?;
+        launch.env.retain(|(name, _)| name != "CODEX_PATH");
+        launch.env.extend(env);
+        Some(relay)
+    } else {
+        None
+    };
     let mut command = std::process::Command::new(&launch.command);
     if launch.subscription_cli.is_some() {
         subscription::isolate_environment(&mut command);
@@ -871,18 +894,23 @@ where
             async move |notification: SessionNotification, _| {
                 if let Ok(update) = serde_json::to_value(notification.update) {
                     let session_id = notification.session_id.0.to_string();
+                    let mut reconnect = None;
                     if let Ok(turns) = update_turns.lock() {
                         if let Some(turn) = turns.get(&session_id) {
                             turn.retry.send_modify(|state| {
                                 if prompt_retry::is_progress(&update) { state.progress(); }
                                 state.observe_failure(&update);
+                                reconnect = state.observe_native_retry(&update);
                             });
                         }
                     }
                     updates(AgentEvent::Update {
-                        session_id,
+                        session_id: session_id.clone(),
                         update,
                     });
+                    if let Some((turn_id, attempt)) = reconnect {
+                        updates(AgentEvent::TurnRetrying { session_id, turn_id, attempt, max_attempts: prompt_retry::MAX_ATTEMPTS });
+                    }
                 }
                 Ok(())
             },
@@ -955,10 +983,11 @@ where
         // forever and the UI never learns the connection is gone.
         .on_close(async |_| Err(internal("The Agent exited")))
         .connect_with(transport, |connection: ConnectionTo<Agent>| async move {
-            // The public Claude failure extension keeps synthetic API errors
+            // The public failure extension keeps synthetic API errors
             // distinct from model output and carries their actionable titles.
             let claude_api_key = gateway.as_ref().is_some_and(|route| route.protocol == ProviderProtocol::AnthropicMessages);
-            let air_capabilities = if claude_api_key { vec!["recommendedValue", "sessionFailure"] } else { vec!["recommendedValue"] };
+            let typed_failures = claude_api_key || gateway.as_ref().is_some_and(|route| route.native_recovery);
+            let air_capabilities = if typed_failures { vec!["recommendedValue", "sessionFailure"] } else { vec!["recommendedValue"] };
             let capabilities = ClientCapabilities::new()
                 .auth(AuthCapabilities::new().meta(serde_json::Map::from_iter([(
                     GATEWAY_AUTH_METHOD.to_owned(),
@@ -1025,6 +1054,7 @@ where
             let quota_running = Arc::new(AtomicBool::new(false));
             let mut last_quota = None::<tokio::time::Instant>;
             let generations = AtomicU64::new(0);
+            let mut native_sequences = HashMap::<String, Arc<AtomicU64>>::new();
             let mut tasks = JoinSet::new();
             let (cancel_deadline_tx, mut cancel_deadlines) = async_mpsc::unbounded_channel();
             loop {
@@ -1160,7 +1190,12 @@ where
                         };
                         let generation = generations.fetch_add(1, Ordering::SeqCst) + 1;
                         let retry_enabled = gateway.as_ref().is_some_and(|route| route.protocol == ProviderProtocol::AnthropicMessages);
-                        let (retry, retry_changes) = tokio::sync::watch::channel(prompt_retry::State::new(retry_enabled));
+                        let native_recovery = gateway.as_ref().is_some_and(|route| route.native_recovery);
+                        let retry_state = if native_recovery {
+                            let sequence = native_sequences.entry(session_id.clone()).or_insert_with(|| Arc::new(AtomicU64::new(0))).clone();
+                            prompt_retry::State::native(sequence)
+                        } else { prompt_retry::State::new(retry_enabled) };
+                        let (retry, retry_changes) = tokio::sync::watch::channel(retry_state);
                         let busy = match turns.lock() {
                             Ok(mut turns) if !turns.contains_key(&session_id) => {
                                 turns.insert(session_id.clone(), RunningTurn { generation, cancelling: false, retry: retry.clone() });

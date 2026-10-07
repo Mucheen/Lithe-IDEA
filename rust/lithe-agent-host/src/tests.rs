@@ -31,6 +31,7 @@ fn gateway() -> Option<GatewaySignIn> {
         headers: vec![("Authorization".into(), "Bearer test-key-123".into())],
         provider_name: Some("Example".into()),
         model: None,
+        native_recovery: false,
     })
 }
 
@@ -44,6 +45,7 @@ fn claude_route() -> GatewaySignIn {
         headers: vec![("x-api-key".into(), provider.api_key)],
         provider_name: provider.name,
         model: provider.model,
+        native_recovery: false,
     }
 }
 
@@ -178,6 +180,15 @@ impl Harness {
             .agent
             .reply(&initialize, json!({"protocolVersion": 1}))
             .await;
+        assert!(matches!(harness.event().await, AgentEvent::Ready { .. }));
+        harness
+    }
+
+    async fn ready_codex() -> Self {
+        let mut route = gateway().unwrap();
+        route.native_recovery = true;
+        let mut harness = Self::start_with_route(false, Some(route));
+        harness.agent.handshake().await;
         assert!(matches!(harness.event().await, AgentEvent::Ready { .. }));
         harness
     }
@@ -723,6 +734,402 @@ async fn responses_agent_errors_keep_their_upstream_retry_policy() {
         harness.event().await,
         AgentEvent::RequestFailed { .. }
     ));
+    assert_eq!(harness.stop().await, Ok(()));
+}
+
+fn codex_failure_update(sequence: u64, info: Value, active: bool) -> Value {
+    let mut update = fixture()["events"]["codexNativeRetry"]["update"].clone();
+    let title = &mut update["_meta"]["jetbrains"]["air"]["sessionFailure"]["title"];
+    let mut envelope: Value = serde_json::from_str(title.as_str().unwrap()).unwrap();
+    envelope["litheCodexFailure"]["sequence"] = json!(sequence);
+    envelope["litheCodexFailure"]["codexErrorInfo"] = info;
+    envelope["litheCodexFailure"]["activeTurn"] = json!(active);
+    *title = json!(envelope.to_string());
+    update
+}
+
+async fn send_codex_failure(harness: &mut Harness, update: Value) {
+    harness.agent.write(json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-1", "update": update}})).await;
+    assert!(matches!(harness.event().await, AgentEvent::Update { .. }));
+}
+
+#[tokio::test(start_paused = true)]
+async fn codex_native_retries_report_five_attempts_without_resending_prompt() {
+    let mut harness = Harness::ready_codex().await;
+    harness.open_session("session-1").await;
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+    let prompt = harness.agent.expect("session/prompt").await;
+    for sequence in 1..=4 {
+        send_codex_failure(
+            &mut harness,
+            codex_failure_update(
+                sequence,
+                json!({"responseStreamDisconnected": {"httpStatusCode": 503}}),
+                true,
+            ),
+        )
+        .await;
+        assert!(
+            matches!(harness.event().await, AgentEvent::TurnRetrying { attempt, max_attempts: 5, .. } if attempt == sequence as u32 + 1)
+        );
+    }
+    harness
+        .agent
+        .reply(
+            &prompt,
+            fixture()["upstream"]["codexFailureResponse"].clone(),
+        )
+        .await;
+    assert!(
+        matches!(harness.event().await, AgentEvent::RequestFailed { message, .. } if message == "Local Codex fixture failure")
+    );
+    // stop() expects only shutdown/cancel protocol: another session/prompt
+    // would fail the test, including after the terminal native failure.
+    assert_eq!(harness.stop().await, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn codex_permanent_native_failures_cancel_immediately_and_preserve_reason() {
+    for info in [
+        json!("unauthorized"),
+        json!("usageLimitExceeded"),
+        json!("badRequest"),
+        json!({"responseStreamDisconnected": {"httpStatusCode": 404}}),
+    ] {
+        let mut harness = Harness::ready_codex().await;
+        harness.open_session("session-1").await;
+        harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+        let prompt = harness.agent.expect("session/prompt").await;
+        send_codex_failure(&mut harness, codex_failure_update(1, info, true)).await;
+        harness.agent.expect("session/cancel").await;
+        assert!(matches!(
+            harness.event().await,
+            AgentEvent::TurnCancelling { .. }
+        ));
+        harness
+            .agent
+            .reply(&prompt, json!({"stopReason": "cancelled"}))
+            .await;
+        assert!(
+            matches!(harness.event().await, AgentEvent::RequestFailed { message, .. } if message == "Local Codex fixture failure")
+        );
+        assert_eq!(harness.stop().await, Ok(()));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn codex_reconnect_deadline_does_not_restart_and_cancellation_is_acknowledged() {
+    let mut harness = Harness::ready_codex().await;
+    harness.open_session("session-1").await;
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+    let prompt = harness.agent.expect("session/prompt").await;
+    send_codex_failure(
+        &mut harness,
+        codex_failure_update(1, json!("rateLimitExceeded"), true),
+    )
+    .await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnRetrying { attempt: 2, .. }
+    ));
+    tokio::time::advance(Duration::from_secs(19)).await;
+    send_codex_failure(
+        &mut harness,
+        codex_failure_update(2, json!("rateLimitExceeded"), true),
+    )
+    .await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnRetrying { attempt: 3, .. }
+    ));
+    tokio::time::advance(Duration::from_secs(1)).await;
+    harness.agent.expect("session/cancel").await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnCancelling { .. }
+    ));
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "overlap"}));
+    assert!(
+        matches!(harness.event().await, AgentEvent::RequestFailed { message, .. } if message.contains("still responding"))
+    );
+    harness
+        .agent
+        .reply(&prompt, json!({"stopReason": "cancelled"}))
+        .await;
+    assert!(
+        matches!(harness.event().await, AgentEvent::RequestFailed { message, .. } if message.contains("20 seconds") && message.contains("Local Codex fixture failure"))
+    );
+    assert_eq!(harness.stop().await, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn codex_recovered_progress_clears_short_wait_and_later_retries_get_a_new_window() {
+    let mut harness = Harness::ready_codex().await;
+    harness.open_session("session-1").await;
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+    let prompt = harness.agent.expect("session/prompt").await;
+    let failure = codex_failure_update(
+        1,
+        json!({"responseStreamDisconnected": {"httpStatusCode": null}}),
+        true,
+    );
+    send_codex_failure(&mut harness, failure.clone()).await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnRetrying { attempt: 2, .. }
+    ));
+    send_codex_failure(&mut harness, failure).await; // duplicate is not another attempt
+    send_codex_failure(
+        &mut harness,
+        codex_failure_update(2, json!("unauthorized"), false),
+    )
+    .await; // retired native turn
+    harness.agent.write(json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-1", "update": {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "reasoning"}}}})).await;
+    assert!(matches!(harness.event().await, AgentEvent::Update { .. }));
+    tokio::time::advance(Duration::from_secs(25)).await;
+    send_codex_failure(
+        &mut harness,
+        codex_failure_update(3, json!("internalServerError"), true),
+    )
+    .await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnRetrying { attempt: 2, .. }
+    ));
+    harness
+        .agent
+        .reply(&prompt, json!({"stopReason": "end_turn"}))
+        .await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnFinished { .. }
+    ));
+    assert_eq!(harness.stop().await, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn codex_retry_budget_overrun_is_stopped_without_starting_a_sixth_host_prompt() {
+    let mut harness = Harness::ready_codex().await;
+    harness.open_session("session-1").await;
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+    let prompt = harness.agent.expect("session/prompt").await;
+    for sequence in 1..=5 {
+        send_codex_failure(
+            &mut harness,
+            codex_failure_update(sequence, json!("internalServerError"), true),
+        )
+        .await;
+        if sequence < 5 {
+            assert!(matches!(
+                harness.event().await,
+                AgentEvent::TurnRetrying { .. }
+            ));
+        }
+    }
+    harness.agent.expect("session/cancel").await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnCancelling { .. }
+    ));
+    harness
+        .agent
+        .reply(&prompt, json!({"stopReason": "cancelled"}))
+        .await;
+    assert!(
+        matches!(harness.event().await, AgentEvent::RequestFailed { message, .. } if message.contains("five attempts"))
+    );
+    assert_eq!(harness.stop().await, Ok(()));
+}
+
+#[test]
+fn codex_retry_helper_is_owned_by_one_launch_and_removed_on_drop() {
+    let (relay, env) = codex_retry::Relay::create(Path::new("/fixture/codex")).unwrap();
+    let script = PathBuf::from(&env.iter().find(|(name, _)| name == "CODEX_PATH").unwrap().1);
+    let directory = script.parent().unwrap().to_owned();
+    assert!(script.is_file());
+    assert_eq!(
+        env.iter()
+            .find(|(name, _)| name == "LITHE_CODEX_STREAM_RETRIES")
+            .unwrap()
+            .1,
+        "4"
+    );
+    drop(relay);
+    assert!(
+        !directory.exists(),
+        "per-launch helper is not a reusable cache"
+    );
+}
+
+fn codex_rate_limit_response() -> Value {
+    let mut response = fixture()["upstream"]["codexFailureResponse"].clone();
+    let title = &mut response["_meta"]["jetbrains"]["air"]["sessionFailure"]["title"];
+    let mut envelope: Value = serde_json::from_str(title.as_str().unwrap()).unwrap();
+    envelope["litheCodexFailure"]["codexErrorInfo"] =
+        json!({"responseTooManyFailedAttempts": {"httpStatusCode": 429}});
+    envelope["litheCodexFailure"]["sequence"] = json!(1);
+    *title = json!(envelope.to_string());
+    response
+}
+
+#[tokio::test(start_paused = true)]
+async fn codex_rate_limit_gap_shares_native_budget_and_never_replays_work() {
+    for progress in [false, true] {
+        let mut harness = Harness::ready_codex().await;
+        harness.open_session("session-1").await;
+        harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+        let prompt = harness.agent.expect("session/prompt").await;
+        if progress {
+            harness.agent.write(json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-1", "update": {"sessionUpdate": "tool_call", "toolCallId": "tool-1", "title": "Execute", "kind": "execute"}}})).await;
+            assert!(matches!(harness.event().await, AgentEvent::Update { .. }));
+        }
+        harness
+            .agent
+            .reply(&prompt, codex_rate_limit_response())
+            .await;
+        if progress {
+            assert!(matches!(
+                harness.event().await,
+                AgentEvent::RequestFailed { .. }
+            ));
+        } else {
+            harness.agent.expect("session/cancel").await;
+            assert!(matches!(
+                harness.event().await,
+                AgentEvent::TurnRetrying { attempt: 2, .. }
+            ));
+            tokio::time::advance(Duration::from_millis(500)).await;
+            let retry = harness.agent.expect("session/prompt").await;
+            for sequence in 1..=3 {
+                send_codex_failure(
+                    &mut harness,
+                    codex_failure_update(sequence + 1, json!("internalServerError"), true),
+                )
+                .await;
+                assert!(
+                    matches!(harness.event().await, AgentEvent::TurnRetrying { attempt, .. } if attempt == sequence as u32 + 2)
+                );
+            }
+            harness
+                .agent
+                .reply(&retry, codex_rate_limit_response())
+                .await;
+            assert!(matches!(
+                harness.event().await,
+                AgentEvent::RequestFailed { .. }
+            ));
+        }
+        assert_eq!(harness.stop().await, Ok(()));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn codex_unacknowledged_reconnect_stop_terminates_the_connection_after_grace() {
+    let mut harness = Harness::ready_codex().await;
+    harness.open_session("session-1").await;
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+    harness.agent.expect("session/prompt").await;
+    send_codex_failure(
+        &mut harness,
+        codex_failure_update(1, json!("internalServerError"), true),
+    )
+    .await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnRetrying { .. }
+    ));
+    tokio::time::advance(prompt_retry::RETRY_WINDOW).await;
+    harness.agent.expect("session/cancel").await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnCancelling { .. }
+    ));
+    tokio::time::advance(CANCEL_TIMEOUT).await;
+    assert!(
+        matches!(harness.event().await, AgentEvent::RequestFailed { message, .. } if message.contains("20 seconds"))
+    );
+    let result = tokio::time::timeout(WAIT, &mut harness.connection)
+        .await
+        .expect("connection finishes within local deadline")
+        .expect("connection task completes");
+    assert!(result.unwrap_err().contains("did not acknowledge Stop"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn codex_delayed_previous_turn_warnings_cannot_change_the_next_prompt() {
+    let mut harness = Harness::ready_codex().await;
+    harness.open_session("session-1").await;
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+    let first = harness.agent.expect("session/prompt").await;
+    harness
+        .agent
+        .reply(
+            &first,
+            fixture()["upstream"]["codexFailureResponse"].clone(),
+        )
+        .await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::RequestFailed { .. }
+    ));
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "next"}));
+    let next = harness.agent.expect("session/prompt").await;
+    // The warning was encoded while the old native turn was active but arrives
+    // after its terminal sequence 5. It must not cancel or count in this prompt.
+    send_codex_failure(
+        &mut harness,
+        codex_failure_update(4, json!("unauthorized"), true),
+    )
+    .await;
+    send_codex_failure(
+        &mut harness,
+        codex_failure_update(6, json!("internalServerError"), true),
+    )
+    .await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnRetrying { attempt: 2, .. }
+    ));
+    harness
+        .agent
+        .reply(&next, json!({"stopReason": "end_turn"}))
+        .await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnFinished { .. }
+    ));
+    assert_eq!(harness.stop().await, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn codex_permanent_failure_cannot_be_erased_by_a_ready_success_response() {
+    let mut harness = Harness::ready_codex().await;
+    harness.open_session("session-1").await;
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+    let prompt = harness.agent.expect("session/prompt").await;
+    // Publish both messages before yielding to the host, controlling the race
+    // between its permanent stop deadline and prompt completion.
+    let notification = json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-1", "update": codex_failure_update(1, json!("unauthorized"), true)}});
+    let response =
+        json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}});
+    harness
+        .agent
+        .writer
+        .write_all(format!("{notification}\n{response}\n").as_bytes())
+        .await
+        .unwrap();
+    assert!(matches!(harness.event().await, AgentEvent::Update { .. }));
+    let next = harness.event().await;
+    if matches!(next, AgentEvent::TurnCancelling { .. }) {
+        harness.agent.expect("session/cancel").await;
+        assert!(
+            matches!(harness.event().await, AgentEvent::RequestFailed { message, .. } if message == "Local Codex fixture failure")
+        );
+    } else {
+        assert!(
+            matches!(next, AgentEvent::RequestFailed { message, .. } if message == "Local Codex fixture failure")
+        );
+    }
     assert_eq!(harness.stop().await, Ok(()));
 }
 

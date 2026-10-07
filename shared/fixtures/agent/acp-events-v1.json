@@ -107,6 +107,10 @@
       "kind": "update", "sessionId": "session-1",
       "update": { "sessionUpdate": "session_info_update", "_meta": { "codex": { "error": { "message": "Stream closed before completion; reconnecting.", "codexErrorInfo": null, "additionalDetails": null, "turnId": "upstream-turn-1", "willRetry": true } } } }
     },
+    "codexNativeRetry": {
+      "kind": "update", "sessionId": "session-1",
+      "update": {"sessionUpdate": "session_info_update", "_meta": {"jetbrains": {"air": {"version": 1, "sessionFailure": {"id": "upstream-turn-1:error", "revision": 1, "category": "connection", "severity": "warning", "title": "{\"litheCodexFailure\":{\"message\":\"Local Codex fixture failure\",\"codexErrorInfo\":{\"responseStreamDisconnected\":{\"httpStatusCode\":503}},\"turnId\":\"upstream-turn-1\",\"willRetry\":true,\"activeTurn\":true,\"sequence\":1}}", "actions": []}}}}}
+    },
     "sessionInfo": {
       "kind": "update",
       "sessionId": "session-1",
@@ -142,6 +146,9 @@
     "stopped": { "kind": "stopped", "message": "The Agent connection closed unexpectedly" }
   },
   "upstream": {
+    "codexFailureResponse": {
+      "stopReason": "end_turn", "_meta": {"jetbrains": {"air": {"version": 1, "sessionFailure": {"id": "upstream-turn-1:error", "revision": 5, "category": "connection", "severity": "error", "title": "{\"litheCodexFailure\":{\"message\":\"Local Codex fixture failure\",\"codexErrorInfo\":{\"httpConnectionFailed\":{\"httpStatusCode\":503}},\"turnId\":\"upstream-turn-1\",\"willRetry\":false,\"activeTurn\":true,\"sequence\":5}}", "actions": ["retry", "new_session"]}}}}
+    },
     "claudeTemporaryFailureResponse": {
       "stopReason": "end_turn", "_meta": { "jetbrains": { "air": { "version": 1, "sessionFailure": { "id": "upstream-turn-1:error", "revision": 1, "category": "service", "severity": "error", "title": "API Error: 503 No available channel", "actions": ["retry"] } } } }
     },

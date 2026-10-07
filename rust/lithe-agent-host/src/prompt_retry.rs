@@ -1,10 +1,18 @@
-//! Bounded recovery of rejected Claude API-key prompts, before any work starts.
+//! Shared API-key recovery budgets, cancellation and failure normalization.
 //!
 //! The native CLI has one retry budget for permanent and temporary errors and
 //! may honor minutes of Retry-After. Disable that layer through public options;
-//! retry only categorical ACP failures here, retaining one busy turn and owner.
+//! retry only categorical pre-work Claude failures and the native HTTP 429 gap
+//! here. Codex otherwise owns recovery; both retain one busy turn and owner.
 
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use agent_client_protocol::{
     schema::v1::{CancelNotification, PromptRequest, PromptResponse, StopReason},
@@ -12,7 +20,7 @@ use agent_client_protocol::{
 };
 use tokio::{sync::watch, time::Instant};
 
-use crate::{AgentEvent, Emit};
+use crate::{codex_retry, AgentEvent, Emit};
 
 pub(crate) const MAX_ATTEMPTS: u32 = 5;
 /// Total reconnecting window, excluding the first attempt and cancellation ACK.
@@ -25,6 +33,13 @@ pub(crate) struct State {
     deadline: Option<Instant>,
     last_failure: Option<String>,
     provider_message: Option<String>,
+    native: bool,
+    native_attempt: u32,
+    /// Retained across prompts of this session so delayed old warnings cannot
+    /// enter a fresh turn after its predecessor's terminal response.
+    native_sequence: Arc<AtomicU64>,
+    stop_message: Option<String>,
+    native_replay_safe: bool,
 }
 
 impl State {
@@ -35,6 +50,20 @@ impl State {
             deadline: None,
             last_failure: None,
             provider_message: None,
+            native: false,
+            native_attempt: 1,
+            native_sequence: Arc::new(AtomicU64::new(0)),
+            stop_message: None,
+            native_replay_safe: false,
+        }
+    }
+
+    pub(crate) fn native(sequence: Arc<AtomicU64>) -> Self {
+        Self {
+            native: true,
+            native_replay_safe: true,
+            native_sequence: sequence,
+            ..Self::new(false)
         }
     }
 
@@ -42,12 +71,23 @@ impl State {
     /// retry window. Normal reasoning, tool and permission limits still apply.
     pub(crate) fn progress(&mut self) {
         self.eligible = false;
+        self.native_replay_safe = false;
         self.deadline = None;
+        if self.native && self.stop_message.is_none() {
+            self.native_attempt = 1;
+        }
+        // Output cannot revoke an already observed terminal native failure.
+        if self.stop_message.is_some() {
+            self.deadline = Some(Instant::now());
+        }
     }
 
     /// AIR's public failure extension suppresses synthetic assistant error text.
     /// Retain its title for the terminal error; categories never come from text.
     pub(crate) fn observe_failure(&mut self, update: &serde_json::Value) {
+        if self.native {
+            return;
+        }
         let air = &update["_meta"]["jetbrains"]["air"];
         let failure = &air["sessionFailure"];
         if update["sessionUpdate"] == "session_info_update"
@@ -63,13 +103,74 @@ impl State {
         }
     }
 
+    /// Native Codex owns retries; the host observes real error notifications
+    /// rather than issuing another prompt or parsing its reconnect counter.
+    pub(crate) fn observe_native_retry(
+        &mut self,
+        update: &serde_json::Value,
+    ) -> Option<(String, u32)> {
+        if !self.native
+            || self.cancelling
+            || self.stop_message.is_some()
+            || update["sessionUpdate"] != "session_info_update"
+        {
+            return None;
+        }
+        let air = &update["_meta"]["jetbrains"]["air"];
+        if air["version"] != 1 {
+            return None;
+        }
+        let failure = &air["sessionFailure"];
+        let native = codex_retry::failure(failure["title"].as_str()?)?;
+        if native["activeTurn"] != true {
+            return None;
+        }
+        let sequence = native["sequence"].as_u64()?;
+        if sequence <= self.native_sequence.load(Ordering::SeqCst) {
+            return None;
+        }
+        let turn_id = native["turnId"].as_str()?.to_owned();
+        if turn_id.is_empty() {
+            return None;
+        }
+        self.native_sequence.fetch_max(sequence, Ordering::SeqCst);
+        let message = native["message"].as_str()?.to_owned();
+        if failure["severity"] == "error" || codex_retry::permanent(&native) {
+            self.stop_message = Some(message);
+            self.deadline = Some(Instant::now());
+            return None;
+        }
+        if failure["severity"] != "warning" || native["willRetry"] != true {
+            return None;
+        }
+        self.deadline
+            .get_or_insert_with(|| Instant::now() + RETRY_WINDOW);
+        self.last_failure = Some(message.clone());
+        self.native_attempt += 1;
+        if self.native_attempt > MAX_ATTEMPTS {
+            self.stop_message = Some(format!(
+                "Reconnecting failed after five attempts. {message}"
+            ));
+            self.deadline = Some(Instant::now());
+            return None;
+        }
+        Some((turn_id, self.native_attempt))
+    }
+
     pub(crate) fn timeout_message(&self) -> String {
+        if let Some(message) = &self.stop_message {
+            return message.clone();
+        }
         match &self.last_failure {
             Some(message) if self.deadline.is_some() => {
                 format!("Reconnecting exceeded 20 seconds. The turn was stopped. {message}")
             }
             _ => crate::PROMPT_TIMEOUT_MESSAGE.into(),
         }
+    }
+
+    fn can_replay(&self) -> bool {
+        self.stop_message.is_none() && (self.eligible || (self.native && self.native_replay_safe))
     }
 }
 
@@ -122,6 +223,12 @@ fn reported_http_status(title: &str) -> Option<u16> {
 }
 
 fn failure_message(failure: &serde_json::Value, title: &str) -> String {
+    if let Some(native) = codex_retry::failure(title) {
+        return native["message"]
+            .as_str()
+            .unwrap_or("The Codex request failed.")
+            .into();
+    }
     match failure["details"]
         .as_str()
         .filter(|details| !details.trim().is_empty() && details.len() <= 8192)
@@ -134,11 +241,9 @@ fn failure_message(failure: &serde_json::Value, title: &str) -> String {
 /// Preserve actionable error text without exposing the AIR incident object.
 pub(crate) fn error_message(error: &Error) -> String {
     // Keep incident ids, revisions and duplicated JSON internal to retry policy.
-    if error
-        .data
-        .as_ref()
-        .is_some_and(|data| data.get("sessionFailure").is_some())
-    {
+    if error.data.as_ref().is_some_and(|data| {
+        data.get("sessionFailure").is_some() || data["litheRecoveryStopped"] == true
+    }) {
         error.message.clone()
     } else {
         error.to_string()
@@ -156,8 +261,11 @@ fn terminal_failure(response: &PromptResponse) -> Option<Error> {
     }
     let title = failure["title"]
         .as_str()
-        .filter(|title| !title.trim().is_empty() && title.len() <= 8192)
-        .unwrap_or("The Claude request failed.");
+        .filter(|title| {
+            !title.trim().is_empty()
+                && (title.len() <= 8192 || codex_retry::failure(title).is_some())
+        })
+        .unwrap_or("The Agent request failed.");
     Some(
         Error::new(-32603, failure_message(failure, title))
             .data(serde_json::json!({"sessionFailure": failure})),
@@ -194,15 +302,34 @@ pub(crate) async fn run(
         let mut result = connection.send_request(request.clone()).block_task().await;
         if let Ok(response) = &result {
             if let Some(failure) = terminal_failure(response) {
+                if state.borrow().native {
+                    if let Some(sequence) = codex_retry::terminal_sequence(&failure) {
+                        state
+                            .borrow()
+                            .native_sequence
+                            .fetch_max(sequence, Ordering::SeqCst);
+                    }
+                }
                 result = Err(failure);
             }
+        }
+        // A native response and the stop deadline can become ready together.
+        // Keep the already observed failure even if a late response succeeds;
+        // the settled request itself proves acknowledgment in this branch.
+        if let Some(message) = &state.borrow().stop_message {
+            return Err(Error::new(-32603, message.clone())
+                .data(serde_json::json!({"litheRecoveryStopped": true})));
         }
         if let (Err(error), Some(message)) = (&mut result, &state.borrow().provider_message) {
             error.message = message.clone();
         }
         let Err(error) = &result else { return result };
-        let can_reconnect =
-            retryable(error) && state.borrow().eligible && !state.borrow().cancelling;
+        let can_reconnect = !state.borrow().cancelling
+            && state.borrow().can_replay()
+            && (retryable(error) && state.borrow().eligible
+                || codex_retry::rate_limit(error)
+                    && state.borrow().native
+                    && state.borrow().native_attempt < MAX_ATTEMPTS);
         if can_reconnect {
             // An ACP failure settled the attempt, but its SDK stream may retain
             // a queued failed request. Clear it even after the final attempt so
@@ -218,11 +345,18 @@ pub(crate) async fn run(
                 .deadline
                 .get_or_insert_with(|| Instant::now() + RETRY_WINDOW);
             current.last_failure = Some(error_message(error));
+            if current.native {
+                current.native_attempt += 1;
+            }
         });
         emit(AgentEvent::TurnRetrying {
             session_id: request.session_id.0.to_string(),
             turn_id: turn_id.clone(),
-            attempt: attempt + 1,
+            attempt: if state.borrow().native {
+                state.borrow().native_attempt
+            } else {
+                attempt + 1
+            },
             max_attempts: MAX_ATTEMPTS,
         });
         // Four delays total 7.5 seconds. Provider Retry-After is not propagated
@@ -233,7 +367,7 @@ pub(crate) async fn run(
             if changes.borrow().cancelling {
                 return Ok(PromptResponse::new(StopReason::Cancelled));
             }
-            if !changes.borrow().eligible {
+            if !changes.borrow().can_replay() {
                 return result;
             }
             tokio::select! {
@@ -244,7 +378,7 @@ pub(crate) async fn run(
         if state.borrow().cancelling {
             return Ok(PromptResponse::new(StopReason::Cancelled));
         }
-        if !state.borrow().eligible {
+        if !state.borrow().can_replay() {
             return result;
         }
     }

@@ -9,6 +9,28 @@ import Testing
 @MainActor
 struct AgentConversationFeatureModelTests {
     @Test
+    func codexNativeFailureMetadataAndHostCountsKeepOneTimedTurn() async throws {
+        try await withStatisticsFeature { feature, connection, clock in
+            try feature.send("Try Codex")
+            try feature.receive(event("sessionCreated", ["token": connection.commands.last?["token"] as Any]))
+            let turn = feature.selectedConversation?.activeTurn
+            try feature.receive(event("codexNativeRetry"))
+            #expect(feature.selectedConversation?.responseStatus == .waiting)
+            try feature.receive(event("turnRetrying", ["turnId": "upstream-turn-1"]))
+            #expect(feature.selectedConversation?.responseStatus == .retrying)
+            #expect(feature.selectedConversation?.retryAttempt == 2)
+            #expect(feature.selectedConversation?.activeTurn == turn)
+            clock.advance(20)
+            try feature.receive(event("turnCancelling"))
+            #expect(feature.selectedConversation?.responseStatus == .stopping)
+            try feature.receive(event("requestFailed", ["message": "Reconnecting exceeded 20 seconds. Local fixture failure"]))
+            #expect(feature.selectedConversation?.retryAttempt == nil)
+            #expect(feature.selectedConversation?.completedTurns.last?.duration == 20)
+            #expect(feature.selectedConversation?.errorMessage?.contains("Local fixture failure") == true)
+        }
+    }
+
+    @Test
     func hostReconnectionShowsAttemptCountAndClearsOnProgressOrFailure() async throws {
         try await withStatisticsFeature { feature, connection, clock in
             try feature.send("Try the service")
