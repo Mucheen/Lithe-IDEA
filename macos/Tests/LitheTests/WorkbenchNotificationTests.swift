@@ -169,6 +169,27 @@ struct WorkbenchNotificationTests {
     }
 
     @Test
+    func repeatingACollapsedMessageKeepsTheOverflowEntry() {
+        let feature = WorkbenchNotificationFeatureModel()
+        feature.setApplicationActive(false)
+        defer { feature.clear() }
+
+        for message in ["A", "B", "C", "D"] { feature.show(message) }
+        #expect(feature.activeNotifications.map(\.message) == ["B", "C", "D"])
+        #expect(feature.activeNotifications.map(\.collapsedCount) == [1, 0, 0])
+
+        feature.show("B")
+
+        // The repeat takes the newest slot, and the "N more notifications" entry
+        // stays on the oldest balloon instead of vanishing with the history copy
+        // that replaced it.
+        #expect(feature.activeNotifications.map(\.message) == ["C", "D", "B"])
+        #expect(feature.activeNotifications.map(\.collapsedCount) == [1, 0, 0])
+        #expect(feature.notifications.map(\.message) == ["B", "D", "C", "A"])
+        #expect(feature.notifications.first?.occurrenceCount == 2)
+    }
+
+    @Test
     func repeatingAnActiveMessageRestartsItsOwnBalloonDeadline() async {
         let clock = NotificationTestClock()
         let feature = WorkbenchNotificationFeatureModel(now: { clock.now }, sleep: { try await clock.sleep($0) })

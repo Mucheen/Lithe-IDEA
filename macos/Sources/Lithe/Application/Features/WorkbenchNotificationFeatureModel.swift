@@ -85,8 +85,16 @@ final class WorkbenchNotificationFeatureModel: ObservableObject {
             present(notification)
             return
         }
-        activeNotifications.remove(at: index)
+        // Overflow is a stack-level affordance, not history: the history copy
+        // never carries `collapsedCount`, so hand the balloon's own count to the
+        // oldest survivor the same way `present` does.
+        let refreshed = activeNotifications.remove(at: index)
         activeNotifications.append(notification)
+        if refreshed.collapsedCount > 0 {
+            activeNotifications[0].collapsedCount = min(
+                activeNotifications[0].collapsedCount + refreshed.collapsedCount,
+                notifications.count - activeNotifications.count)
+        }
         scheduleDismissal(for: notification, after: WorkbenchNotificationTiming.displayDuration)
     }
 
