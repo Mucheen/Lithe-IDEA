@@ -555,6 +555,10 @@ public final class AgentConnectionModel: ObservableObject {
         case "plan":
             guard let plan = AgentPlan.parse(update) else { return }
             conversations[sessionID, default: AgentConversation()].plan = plan.entries.isEmpty ? nil : plan
+            // A valid plan proves recovery without implying streamed reasoning.
+            if conversations[sessionID]?.responsePhase == .retrying {
+                markResponseProgress(.waiting, in: sessionID)
+            }
         case "available_commands_update":
             guard let commands = AgentCommand.parse(update) else { return }
             conversations[sessionID, default: AgentConversation()].availableCommands = commands

@@ -66,6 +66,72 @@ struct AgentConversationFeatureModelTests {
         }
     }
 
+    @Test(arguments: [false, true])
+    func validPlanProgressEndsReconnectingWithoutEndingTheTurn(emptyPlan: Bool) async throws {
+        try await withStatisticsFeature { feature, connection, clock in
+            try feature.send("Inspect the project")
+            try feature.receive(event("sessionCreated", ["token": connection.commands.last?["token"] as Any]))
+            let turn = try #require(feature.selectedConversation?.activeTurn)
+            try feature.receive(event("turnRetrying"))
+            clock.advance(8)
+            // A malformed plan is not evidence that the connection recovered.
+            try feature.receive(event("plan", ["update": ["sessionUpdate": "plan"]]))
+            #expect(feature.selectedConversation?.responseStatus == .retrying)
+            #expect(feature.selectedConversation?.retryAttempt == 2)
+            let entries: [[String: Any]] = emptyPlan ? [] : [
+                ["content": "Inspect files", "priority": "medium", "status": "in_progress"]
+            ]
+            try feature.receive(event("plan", ["update": ["sessionUpdate": "plan", "entries": entries]]))
+            #expect(feature.selectedConversation?.plan?.entries.map(\.content) == (emptyPlan ? nil : ["Inspect files"]))
+            #expect(feature.selectedConversation?.responseStatus == .waiting)
+            #expect(feature.selectedConversation?.retryAttempt == nil)
+            #expect(feature.selectedConversation?.retryMaxAttempts == nil)
+            #expect(feature.selectedConversation?.isResponding == true)
+            #expect(feature.selectedConversation?.activeTurn == turn)
+            #expect(feature.selectedConversation?.activeTurn?.elapsed(at: clock.instant) == 8)
+            #expect(throws: AgentConversationError.sessionBusy) { try feature.send("Overlap") }
+            // A later plan must preserve a reply or reasoning already observed.
+            try feature.receive(event("agentThoughtChunk"))
+            try feature.receive(event("plan"))
+            #expect(feature.selectedConversation?.responseStatus == .thinking)
+            try feature.receive(event("agentMessageChunk"))
+            try feature.receive(event("plan"))
+            #expect(feature.selectedConversation?.responseStatus == .responding)
+            clock.advance(3)
+            try feature.receive(event("turnFinished"))
+            #expect(feature.selectedConversation?.completedTurns.last?.duration == 11)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func planProgressPreservesPermissionAndStoppingPriority(stopping: Bool) async throws {
+        try await withStatisticsFeature { feature, connection, _ in
+            try feature.send("Inspect the project")
+            try feature.receive(event("sessionCreated", ["token": connection.commands.last?["token"] as Any]))
+            let turn = feature.selectedConversation?.activeTurn
+            try feature.receive(event("turnRetrying"))
+            if stopping { feature.cancel() }
+            else {
+                try feature.receive(event("permission"))
+                // Recovery notifications can arrive while approval is pending.
+                try feature.receive(event("turnRetrying"))
+            }
+            #expect(feature.selectedConversation?.retryAttempt == 2)
+            let permissionID = feature.selectedConversation?.permission?.id
+            try feature.receive(event("plan"))
+            #expect(feature.selectedConversation?.plan?.currentEntry?.content == "Run the tests")
+            #expect(feature.selectedConversation?.responseStatus == (stopping ? .stopping : .waitingForPermission))
+            #expect(feature.selectedConversation?.permission?.id == permissionID)
+            #expect(feature.selectedConversation?.activeTurn == turn)
+            if !stopping {
+                #expect(feature.selectedConversation?.retryAttempt == nil)
+                #expect(feature.selectedConversation?.retryMaxAttempts == nil)
+                feature.answerPermission(optionID: "allow_once")
+                #expect(feature.selectedConversation?.responseStatus == .waiting)
+            }
+        }
+    }
+
     @Test
     func invalidHostRetryCountsCannotInventReconnectingState() async throws {
         try await withStatisticsFeature { feature, connection, _ in
