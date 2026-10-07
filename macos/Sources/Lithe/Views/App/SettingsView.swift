@@ -655,17 +655,26 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 18) {
             group("Display") {
                 row("Font") {
-                    LitheSettingsSelect(
-                        selection: $settings.editorFontFamily,
-                        options: editorFontOptions,
-                        width: 240,
-                        accessibilityLabel: "Font",
-                        title: { $0 },
-                        localizesTitles: false,
-                        isAvailable: { MacEditorFontCatalog.isAvailable(family: $0) },
-                        searchPrompt: "Search fonts",
-                        searchText: { $0 }
-                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        LitheSettingsSelect(
+                            selection: $settings.editorFontFamily,
+                            options: editorFontOptions,
+                            width: 240,
+                            accessibilityLabel: "Font",
+                            title: { $0 },
+                            localizesTitles: false,
+                            isAvailable: { MacEditorFontCatalog.isAvailable(family: $0) },
+                            searchPrompt: "Search fonts",
+                            searchText: { $0 }
+                        )
+                        if let coverageNotice = editorFontCoverageNotice {
+                            Text(coverageNotice)
+                                .font(LitheTheme.smallFont)
+                                .foregroundStyle(LitheTheme.warning)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: 420, alignment: .leading)
+                        }
+                    }
                 }
                 row("Font size") {
                     LitheSettingsStepper(
@@ -733,6 +742,35 @@ struct SettingsView: View {
         if options.isEmpty { options = [settings.editorFontFamily] }
         if !options.contains(settings.editorFontFamily) { options.append(settings.editorFontFamily) }
         return options
+    }
+
+    /// Warns when the chosen family cannot render character groups the product
+    /// needs, because those glyphs then come from the fallback chain instead of
+    /// the font the user picked.
+    ///
+    /// The bundled default is deliberately exempt: it is the baseline and the
+    /// fallback target itself, so warning about the shipped font would be noise
+    /// the user cannot act on. An uninstalled family is reported by the control's
+    /// own unavailable styling rather than twice.
+    private var editorFontCoverageNotice: String? {
+        let family = settings.editorFontFamily
+        guard !EditorFontResolution.usesBundledMonospacedFamily(family),
+              MacEditorFontCatalog.isAvailable(family: family) else { return nil }
+
+        let coverage = MacEditorFontCatalog.coverage(
+            family: family,
+            requirements: .forLanguage(settings.language)
+        )
+        guard let description = coverage.missingDescription else { return nil }
+
+        return String(
+            format: String(
+                localized: "%@ does not include %@; Lithe renders those characters with %@ and the system font."
+            ),
+            coverage.family,
+            description,
+            EditorFontDefaults.monospacedFamily
+        )
     }
 
     private var terminalSettings: some View {

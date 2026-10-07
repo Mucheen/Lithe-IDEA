@@ -117,6 +117,32 @@ Diff 的渲染字体和度量字体必须来自同一个族，否则行号栏宽
 Sparkle 的增量更新基线不受影响。如果以后要把字体列表持久化到磁盘，必须走平台存储
 adapter 写到 Caches/Application Support，不能写安装目录。
 
+### 字族缺字时回退到打包字体，并在设置里提示
+
+用户选的字体不保证覆盖全部字符：为 GBK 写的旧字体经常缺标点、符号或界面自己用到的中文字形。
+这里分两件事处理，**显示优先于提示**：
+
+1. **保证能显示。** 打包字族始终是所选字族之后的第一回退，两条渲染路径都要设置：
+   - 网页侧：`MacEditorFontCatalog.editorFontStack(_:)` 产出
+     `"所选族", "JetBrains Mono", monospace`，而不是只发一个族名。只发族名时 Monaco 会补它自己的
+     `monospace`，回退到哪台机器都不一样；显式带上打包字族后，网页和原生界面用同一套回退。
+   - 原生侧：`MacEditorFontCatalog.font(family:size:weight:)` 给非打包字族加上以打包字体描述符
+     开头的 `cascadeList`。AppKit 本身只走系统级联，不加这一步时缺字会落到任意系统字形。
+   - 打包字族自己不再叠加级联（它就是回退目标），所选字族本身就是打包字族时网页栈也不重复。
+   - 打包字体同样没有的中文等字形继续走系统级联，这是原有行为，不视为缺陷。
+
+2. **告诉用户，但不阻塞选择。** 设置 → 编辑器 → 显示 → Font 行下方在缺字时显示提示，
+   形如「Fira Code 不包含中文字符；Lithe 会用 JetBrains Mono 和系统字体显示这些字符。」
+
+   - 探测用 `MacEditorFontCatalog.coverage(family:requirements:)`：对每个字符单独调用
+     `CTFontGetGlyphsForCharacters`，glyph 为 0（`.notdef`）也算缺失，避免批量结果掩盖单个缺字。
+   - 要求集由界面语言决定（`EditorFontRequirements.forLanguage(_:)`）：基本拉丁字母与界面标点
+     **始终**要求；中文只在中英文界面为中文时要求。日文、韩文、希腊文、西里尔文不列入要求，
+     否则一个正常的中英文字体也会被报成缺字。
+   - **打包默认字族豁免提示**：它就是基线和回退目标，提示用户「随包字体缺中文」没有任何可执行
+     动作。只有用户换成别的字族后才可能出现提示。
+   - 字族已卸载时不显示缺字提示，那时由控件的不可用样式负责表达。
+
 ### 可搜索的设置选值控件复用同一个所有者
 
 字体族有数百项，必须能搜索。实现方式是给已有的 `LitheSettingsSelect` 增加可选的
@@ -180,9 +206,15 @@ IDEA 的编辑器字体组合框确实有这个开关，功能上更完整。本
 - `./scripts/verify-runtime-bundle-immutability.sh`
 - `./scripts/verify-agent-notes.sh`
 
+关于缺字回退与提示，`EditorFontFamilyTests` 覆盖：网页字体栈把打包字族放在所选字族之后且以
+`monospace` 结尾、打包字族自身不重复；原生用户字族带以打包字体描述符开头的级联表、打包字族不带；
+探测结果与打包字体实际覆盖一致（覆盖拉丁字母与界面符号、缺中文）；要求集随界面语言变化；
+缺字描述在单个脚本时点名、多个脚本时收敛为通用措辞。
+
 ## 适用范围
 
 - `macos/Sources/Lithe/Models/Settings/EditorFontDefaults.swift`
+- `macos/Sources/Lithe/Models/Settings/EditorFontCoverage.swift`
 - `macos/Sources/Lithe/Models/Settings/AppSettings.swift`
 - `macos/Sources/Lithe/Platform/MacOS/UI/MacEditorFontCatalog.swift`
 - `macos/Sources/Lithe/Platform/MacOS/MonacoWorkbenchEditor.swift`

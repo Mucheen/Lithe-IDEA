@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import SwiftUI
 import Testing
 @testable import Lithe
@@ -106,8 +107,99 @@ struct EditorFontFamilyTests {
         let font = MacEditorFontCatalog.font(family: userFamily, size: 13)
         #expect(
             font.familyName?.caseInsensitiveCompare(userFamily) == .orderedSame,
-            "selected \(userFamily) but resolved \(font.familyName ?? "nil")"
+            "selected \(userFamily) but resolved \(font.fontName) / \(font.familyName ?? "nil")"
         )
+    }
+
+    // MARK: - Fallback for characters a font does not cover
+
+    @Test func editorFontStackKeepsTheBundledFamilyAsTheFallback() {
+        #expect(MacEditorFontCatalog.editorFontStack("JetBrains Mono") == "\"JetBrains Mono\", monospace")
+
+        let stack = MacEditorFontCatalog.editorFontStack("Some Missing Family")
+        // An uninstalled preference resolves to the bundled family, so the stack
+        // must not contain the unresolvable name.
+        #expect(stack == "\"JetBrains Mono\", monospace")
+    }
+
+    @Test func editorFontStackPlacesTheBundledFamilyAfterAUserSelection() throws {
+        let families = MacEditorFontCatalog.editorFamilies()
+        let userFamily = try #require(families.first { $0 != "JetBrains Mono" })
+
+        let stack = MacEditorFontCatalog.editorFontStack(userFamily)
+        let userRange = try #require(stack.range(of: "\"\(userFamily)\""))
+        let bundledRange = try #require(stack.range(of: "\"JetBrains Mono\""))
+        #expect(userRange.lowerBound < bundledRange.lowerBound, "user family must come first: \(stack)")
+        #expect(stack.hasSuffix("monospace"), "the generic family stays last: \(stack)")
+    }
+
+    @Test func userSelectedFamilyKeepsTheBundledFamilyAsFirstCascadeFallback() throws {
+        let families = MacEditorFontCatalog.editorFamilies()
+        let userFamily = try #require(families.first { $0 != "JetBrains Mono" })
+
+        let font = MacEditorFontCatalog.font(family: userFamily, size: 13)
+        let cascade = try #require(
+            font.fontDescriptor.object(forKey: .cascadeList) as? [NSFontDescriptor],
+            "a user-selected family must carry a cascade list so missing glyphs fall back"
+        )
+        let first = try #require(cascade.first)
+        #expect(
+            NSFont(descriptor: first, size: 13)?.fontName == LitheTheme.editorFont(size: 13).fontName,
+            "the shipped family must be the first cascade fallback"
+        )
+
+        // The bundled family is the fallback target itself and needs no cascade.
+        let bundled = MacEditorFontCatalog.font(family: "JetBrains Mono", size: 13)
+        #expect(bundled.fontDescriptor.object(forKey: .cascadeList) == nil)
+    }
+
+    /// Validates the probe samples against the shipped font: the bundled family
+    /// must cover the Latin and symbol groups the interface needs, and it must be
+    /// reported as missing Chinese because it ships no CJK glyphs.
+    @Test func coverageProbeAgreesWithTheShippedFamily() {
+        let scope = BundledMonospacedFontScope()
+        defer { scope.release() }
+        #expect(LitheTheme.editorFont(size: 13).fontName == "JetBrainsMono-Regular")
+
+        let latinOnly = MacEditorFontCatalog.coverage(
+            family: "JetBrains Mono",
+            requirements: .forLanguage(.english)
+        )
+        #expect(
+            latinOnly.missingScripts.isEmpty,
+            "the shipped baseline must render Latin letters and UI symbols: \(latinOnly.missingScripts)"
+        )
+        #expect(latinOnly.missingDescription == nil)
+        #expect(latinOnly.family == "JetBrains Mono")
+
+        let chineseUI = MacEditorFontCatalog.coverage(
+            family: "JetBrains Mono",
+            requirements: .forLanguage(.simplifiedChinese)
+        )
+        #expect(chineseUI.missingScripts == [.chinese])
+        #expect(chineseUI.missingDescription != nil)
+        #expect(!chineseUI.isComplete)
+    }
+
+    @Test func coverageRequirementsFollowTheInterfaceLanguage() {
+        #expect(EditorFontRequirements.forLanguage(.english).scripts == [.latin, .symbols])
+        #expect(EditorFontRequirements.forLanguage(.simplifiedChinese).scripts == [.latin, .symbols, .chinese])
+    }
+
+    @Test func coverageNamesTheMissingGroupAndFallsBackToAGeneralPhrase() {
+        let single = EditorFontCoverage(family: "Fira Code", missingScripts: [.chinese])
+        #expect(single.missingDescription == EditorFontScript.chinese.localizedName)
+
+        let several = EditorFontCoverage(family: "Old GBK Font", missingScripts: [.latin, .symbols, .chinese])
+        #expect(several.missingDescription == String(localized: "characters used by the interface and your files"))
+        #expect(EditorFontCoverage(family: "JetBrains Mono", missingScripts: []).missingDescription == nil)
+    }
+
+    @Test func everyScriptPublishesProbeSamples() {
+        for script in EditorFontScript.allCases {
+            #expect(!script.samples.isEmpty, "\(script.rawValue) needs probe characters")
+            #expect(!script.localizedName.isEmpty)
+        }
     }
 
     @Test func everyBundledWeightStillDelegatesToTheBundledFaceMapping() {
@@ -196,4 +288,30 @@ private final class EditorFontSettingsStore: KeyValueStore, @unchecked Sendable 
     func string(forKey key: String) -> String? { values[key] as? String }
     func stringArray(forKey key: String) -> [String]? { values[key] as? [String] }
     func set(_ value: Any?, forKey key: String) { values[key] = value }
+}
+
+/// Registers the shipped JetBrains Mono faces for the process when nothing else
+/// has done so, so a coverage probe measures the bundled font rather than a
+/// system fallback. Registration is process-wide, so releasing only unregisters
+/// what this scope registered.
+private struct BundledMonospacedFontScope {
+    private let url: URL
+    private let ownsRegistration: Bool
+
+    init() {
+        url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources/Fonts/JetBrainsMono-Regular.ttf")
+        ownsRegistration = NSFont(name: "JetBrainsMono-Regular", size: 13) == nil
+        if ownsRegistration {
+            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        }
+    }
+
+    func release() {
+        guard ownsRegistration else { return }
+        CTFontManagerUnregisterFontsForURL(url as CFURL, .process, nil)
+    }
 }

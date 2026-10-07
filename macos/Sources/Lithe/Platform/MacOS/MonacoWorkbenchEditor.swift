@@ -764,7 +764,9 @@ private final class MonacoWorkbenchSession: NSObject, ObservableObject, WKNaviga
             // The embedded editor resolves fonts through CSS family names, and an
             // uninstalled preference must not reach the web view as an
             // unresolvable family, so resolve against the macOS font database here.
-            fontFamily: MacEditorFontCatalog.resolvedFamily(fontFamily),
+            // A stack rather than one name: the embedded editor needs the bundled
+            // family as its explicit fallback for glyphs the chosen font lacks.
+            fontFamily: MacEditorFontCatalog.editorFontStack(fontFamily),
             wrap: wrap,
             minimap: minimap,
             theme: theme

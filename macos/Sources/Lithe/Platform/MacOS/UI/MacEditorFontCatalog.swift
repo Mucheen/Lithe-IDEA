@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import Foundation
 
 /// Resolves the code editor's programming font family against the macOS font
@@ -50,6 +51,12 @@ enum MacEditorFontCatalog {
     /// faces; requesting a missing face must degrade, not silently drop to the
     /// system monospaced font.
     ///
+    /// A user-selected family also gets the bundled family as its first cascade
+    /// fallback, so a glyph the chosen font does not contain renders in the
+    /// shipped font instead of an arbitrary system face. Characters the bundled
+    /// family also lacks (Chinese, for example) still fall through to the
+    /// system cascade, which is the existing behaviour.
+    ///
     /// Resolved faces are cached because callers ask per row while drawing a
     /// diff; resolving a family through `NSFontManager` on every row would put a
     /// font lookup in the text layout path.
@@ -64,7 +71,7 @@ enum MacEditorFontCatalog {
         }
         faceLock.unlock()
 
-        let face: NSFont
+        var face: NSFont
         if EditorFontResolution.usesBundledMonospacedFamily(resolved) {
             face = LitheTheme.editorFont(size: size, weight: weight)
         } else if let systemFace = NSFontManager.shared.font(
@@ -75,10 +82,74 @@ enum MacEditorFontCatalog {
             face = NSFont(name: resolved, size: size) ?? LitheTheme.editorFont(size: size, weight: weight)
         }
 
+        if !EditorFontResolution.usesBundledMonospacedFamily(resolved) {
+            face = addingBundledFallback(to: face, size: size, weight: weight)
+        }
+
         faceLock.lock()
         faces[key] = face
         faceLock.unlock()
         return face
+    }
+
+    /// Whether a family renders every character group the product requires, and
+    /// which groups it cannot. Never blocks a choice: the editor keeps the
+    /// selected family and relies on the fallback chain for the missing glyphs.
+    static func coverage(
+        family: String,
+        requirements: EditorFontRequirements
+    ) -> EditorFontCoverage {
+        let resolved = resolvedFamily(family)
+        let face = font(family: resolved, size: 13)
+        let missing = requirements.scripts.filter { !covers(face, samples: $0.samples) }
+        return EditorFontCoverage(family: resolved, missingScripts: missing)
+    }
+
+    /// CSS family stack for the embedded editor.
+    ///
+    /// The embedded editor resolves fonts through CSS, so the shipped family is
+    /// appended after the configured one. Without it a glyph missing from the
+    /// chosen font would come from Monaco's generic `monospace` fallback, which
+    /// differs per machine; with it the fallback is the same bundled font the
+    /// native surfaces use.
+    static func editorFontStack(_ configured: String) -> String {
+        let resolved = resolvedFamily(configured)
+        // A family name containing the CSS quote character would break the stack.
+        let name = resolved.replacingOccurrences(of: "\"", with: "'")
+        let quoted = "\"\(name)\""
+
+        if EditorFontResolution.usesBundledMonospacedFamily(resolved) {
+            return "\(quoted), monospace"
+        }
+        return "\(quoted), \"\(EditorFontDefaults.monospacedFamily)\", monospace"
+    }
+
+    /// Adds the bundled descriptor to a face's cascade list.
+    private static func addingBundledFallback(
+        to face: NSFont,
+        size: CGFloat,
+        weight: NSFont.Weight
+    ) -> NSFont {
+        let bundled = LitheTheme.editorFont(size: size, weight: weight).fontDescriptor
+        let descriptor = face.fontDescriptor.addingAttributes([.cascadeList: [bundled]])
+        return NSFont(descriptor: descriptor, size: size) ?? face
+    }
+
+    /// True when every sample character has a real glyph in `face`.
+    ///
+    /// One character is probed at a time so a single missing glyph cannot be
+    /// hidden by a batch result, and a zero glyph id (`.notdef`) counts as
+    /// missing even when CoreText reports success.
+    private static func covers(_ face: NSFont, samples: String) -> Bool {
+        let ctFace = face as CTFont
+
+        for character in samples {
+            var units = Array(String(character).utf16)
+            var glyphs = [CGGlyph](repeating: 0, count: units.count)
+            let mapped = CTFontGetGlyphsForCharacters(ctFace, &units, &glyphs, units.count)
+            guard mapped, !glyphs.contains(0) else { return false }
+        }
+        return true
     }
 
     /// Identity of a resolved face. Sizes and weights come from a small fixed set
