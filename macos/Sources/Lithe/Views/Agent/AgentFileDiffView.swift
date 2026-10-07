@@ -8,7 +8,6 @@ import LitheGitModule
 struct AgentFileDiffView: View {
     let change: AgentFileChange
     let onOpenFile: (AgentToolDetails.Location) -> Void
-    @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
     @State private var selectedIndex = 0
 
@@ -29,7 +28,7 @@ struct AgentFileDiffView: View {
             Text("Agent-reported changes; excerpts may not include the entire file.")
                 .font(LitheTheme.uiFont(size: 11)).foregroundStyle(LitheTheme.secondaryText).padding(.bottom, 8)
             if change.diffs.indices.contains(selectedIndex) {
-                AgentReportedDiffView(diff: change.diffs[selectedIndex], fontFamily: settings.editorFontFamily)
+                AgentReportedDiffView(diff: change.diffs[selectedIndex])
             }
         }
         .frame(minWidth: 600, idealWidth: 860, minHeight: 360, idealHeight: 560)
@@ -39,6 +38,12 @@ struct AgentFileDiffView: View {
 
 private struct AgentReportedDiffView: View {
     let diff: AgentToolDetails.Diff
+    /// Family for the excerpt comparison. The Agent activity bar that presents
+    /// this sheet is deliberately environment-independent (its presentation tests
+    /// host it with only a colour scheme) and the transcript tree has no
+    /// `AppModel` in scope, so the Agent excerpt stays on the bundled monospaced
+    /// family instead of acquiring a required `AppSettings` environment object.
+    /// Threading it here would mean adding a parameter through five view levels.
     var fontFamily: String = EditorFontDefaults.monospacedFamily
     var body: some View {
         VStack(spacing: 0) {

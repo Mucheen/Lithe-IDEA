@@ -3,9 +3,11 @@ import LitheGitModule
 
 struct BranchComparisonView: View {
     @ObservedObject var feature: GitFeatureModel
-    @EnvironmentObject private var settings: AppSettings
     let comparison: GitBranchComparison
     let onRefresh: () async -> Void
+    /// Family for the comparison text. Defaults to the bundled monospaced family;
+    /// the editor area passes the configured family from its own settings.
+    var fontFamily: String = EditorFontDefaults.monospacedFamily
 
     var body: some View {
         VStack(spacing: 0) {
@@ -208,7 +210,7 @@ struct BranchComparisonView: View {
                 DiffPaneView(
                     rows: feature.branchComparisonRows,
                     fileExtension: selectedFileExtension,
-                    fontFamily: settings.editorFontFamily
+                    fontFamily: fontFamily
                 )
             }
         }

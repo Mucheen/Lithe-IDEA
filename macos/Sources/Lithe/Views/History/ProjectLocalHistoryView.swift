@@ -3,8 +3,11 @@ import LitheLocalHistoryModule
 
 struct ProjectLocalHistoryView: View {
     @EnvironmentObject private var model: AppModel
-    @EnvironmentObject private var settings: AppSettings
     let request: ProjectLocalHistoryRequest
+    /// Family for the comparison text. Defaults to the bundled monospaced family
+    /// so the sheet keeps rendering without a required `AppSettings` environment
+    /// object; the presenting root view passes the configured family explicitly.
+    var fontFamily: String = EditorFontDefaults.monospacedFamily
     @State private var isRestoreConfirmationPresented = false
 
     var body: some View {
@@ -173,7 +176,7 @@ struct ProjectLocalHistoryView: View {
                 DiffPaneView(
                     rows: model.projectLocalHistoryDiffRows,
                     fileExtension: selectedFileExtension,
-                    fontFamily: settings.editorFontFamily
+                    fontFamily: fontFamily
                 )
             }
         }

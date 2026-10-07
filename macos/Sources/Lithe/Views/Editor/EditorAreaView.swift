@@ -121,7 +121,8 @@ struct EditorAreaView: View {
                             } else {
                                 await model?.showComparisonWithWorkingTree(for: comparison.reference)
                             }
-                        }
+                        },
+                        fontFamily: settings.editorFontFamily
                     )
                 } else if let feature = model.gitFeatureIfActive,
                           let selectedChange = feature.selectedChange {

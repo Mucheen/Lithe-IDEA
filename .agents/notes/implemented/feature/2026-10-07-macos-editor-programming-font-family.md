@@ -72,8 +72,18 @@ call("configure", ["fontFamily": settings.editorFontFamily])        // 失效族
 ### 作用范围刻意排除终端与输出窗口
 
 `LitheTheme.editorFont(size:weight:)` 没有被改成“读设置”，它仍然表示**打包字体**。终端、
-Output 工具窗、提交信息输入框、搜索替换预览继续调用它。只有这样才保住 IDEA 的
-Editor font / Console font 分工；将来要做 Console font，是独立的一项设置。
+Output 工具窗、提交信息输入框，以及搜索结果里的 Before/After 小片段继续调用它。只有这样
+才保住 IDEA 的 Editor font / Console font 分工；将来要做 Console font，是独立的一项设置。
+
+要区分两种“搜索预览”，它们不是同一件事：
+
+- 搜索结果列表里的 **Before/After 小片段**是结果行的固定排版，用打包字体的 12pt，不跟随
+  字体族设置。
+- 点开的**完整源码预览**是一个真正的编辑器：它经 `SourcePreviewEditorContent.monaco`
+  构造 `MonacoWorkbenchEditor`，因此跟随用户选择的族。
+
+所以不要用“搜索替换预览用打包字体”一句话概括两者；这会把已经正确接线的完整预览说成
+未接线，也会让后来的人误以为搜索结果片段需要单独接线。
 
 ### 原生 Diff 用带默认值的参数传递族名，不注入新的环境对象
 
@@ -82,10 +92,23 @@ Diff 的渲染字体和度量字体必须来自同一个族，否则行号栏宽
 `DiffReviewView` / `GitCommitDiffReviewView` / `DiffPaneView` → `DiffSplitPaneView` /
 `DiffUnifiedPaneView` → `DiffNativeCodeColumn` 传下去。
 
-**不要**给这些视图加 `@EnvironmentObject AppSettings`：现有测试会直接构造
-`DiffSplitPaneView`、`DiffPaneView`、`GitCommitDiffReviewView` 和 `DiffUnifiedLayout`，
-只注入 `AppModel`，加环境对象会让这些测试在运行时崩溃。带默认值的参数既不破坏这些
-调用点，又让产品路径能传入真实族名。
+**不要**给这些视图加 `@EnvironmentObject AppSettings`。这条规则来自一次真实的 CI 失败：
+最初给四个 Diff 入口加了 `@EnvironmentObject AppSettings`，其中 `AgentFileDiffView` 的宿主
+`AgentActivitySummaryBar` 是刻意不依赖环境的（`AgentActivityPresentationTests` 只注入
+`colorScheme` 就把它放进独立 `NSHostingView`），于是测试在运行时直接
+`Fatal error: No ObservableObject of type AppSettings found`，整个 Swift lane 中断。
+`DiffSplitPaneView`、`DiffPaneView`、`GitCommitDiffReviewView`、`DiffUnifiedLayout`、
+`LocalHistoryView`、`BranchComparisonView` 同样会被独立宿主构造。
+
+所以统一这样做：
+
+- 叶子 Diff/预览视图只接受 **带默认值的 `fontFamily` 参数**，默认 `EditorFontDefaults.monospacedFamily`。
+- 族名由**已经持有 `AppSettings` 或 `AppModel` 的宿主**显式传入：`EditorAreaView` 用
+  `settings.editorFontFamily`，`RootView` 的历史 Diff 用 `session.settings.editorFontFamily`。
+  `AppModel` 已经持有 `settings`，不需要新增环境对象。
+- 确实拿不到宿主的表面就保留打包字体，并在代码里写明原因，而不是给它加一个必需环境对象。
+  当前唯一这样的表面是 Agent 上报 Diff 弹窗：`AgentActivitySummaryBar` 不依赖环境，事件流
+  树上也没有 `AppModel`，接进去要在五层视图里加参数，收益不抵风险。
 
 ### 字体枚举只读、只缓存内存
 
@@ -134,8 +157,11 @@ IDEA 的编辑器字体组合框确实有这个开关，功能上更完整。本
 - 收益：macOS 与 Windows 的编辑器字体能力对齐；默认行为不变，属于纯增量；原生 Diff 与
   主编辑器使用同一字体族。
 - 代价：只支持等宽字体；用户字体缺少对应字重时按 `NSFontManager` 最接近的字重降级，
-  不会合成八个字重；字体列表在进程内缓存，新安装的字体需要重开设置窗口或重启应用才会
-  出现在列表里；原生 Diff 的度量现在依赖“可选字体都是等宽”这个前提。
+  不会合成八个字重；原生 Diff 的度量现在依赖“可选字体都是等宽”这个前提。
+- 代价：字体目录是**进程级静态缓存**（`MacEditorFontCatalog.index` 只在进程内构建一次，
+  之后不再失效）。因此新安装或重新安装的字体必须**重启应用**才会出现在候选列表里；
+  重开设置窗口不会重新枚举。验收和文档都按“重启后生效”描述，不能把重开设置窗口当作
+  缓存失效。
 - 代价：首次构建字体列表要枚举系统字体族并逐族实测等宽，实测约 0.27 秒
   （`EditorFontFamilyTests` 里 `bundledFamilyIsAlwaysOfferedAndResolvable` 的 0.268 秒）。
   它只在进程内做一次，由设置页的 `.task` 在页面出现后触发，不阻塞窗口首帧；首次打开
@@ -147,6 +173,8 @@ IDEA 的编辑器字体组合框确实有这个开关，功能上更完整。本
 ## 验证
 
 - `./.agents/skills/write-stable-tests/scripts/test-stability-macos.sh -- --filter EditorFontFamilyTests`
+- `./.agents/skills/write-stable-tests/scripts/test-stability-macos.sh -- --filter SettingsSearchVocabularyTests`
+- `./.agents/skills/write-stable-tests/scripts/test-stability-macos.sh -- --filter AgentActivityPresentationTests`
 - `./scripts/test-macos.sh`
 - `./scripts/verify-platform-feature-matrix.sh`
 - `./scripts/verify-runtime-bundle-immutability.sh`
@@ -159,7 +187,12 @@ IDEA 的编辑器字体组合框确实有这个开关，功能上更完整。本
 - `macos/Sources/Lithe/Platform/MacOS/UI/MacEditorFontCatalog.swift`
 - `macos/Sources/Lithe/Platform/MacOS/MonacoWorkbenchEditor.swift`
 - `macos/Sources/Lithe/Views/App/SettingsView.swift`
+- `macos/Sources/Lithe/Views/App/SettingsSearchVocabulary.swift`
 - `macos/Sources/Lithe/Views/Components/LitheSettingsControls.swift`
 - `macos/Sources/Lithe/Views/Diff/`
+- `macos/Sources/Lithe/Views/History/`
+- `macos/Sources/Lithe/Views/Git/BranchComparisonView.swift`
+- `macos/Sources/Lithe/Views/Agent/AgentFileDiffView.swift`
 - `macos/Tests/LitheTests/EditorFontFamilyTests.swift`
+- `macos/Tests/LitheTests/SettingsSearchVocabularyTests.swift`
 - `shared/platform-feature-matrix/features/editor-font-family.json`

@@ -265,47 +265,13 @@ struct SettingsView: View {
     }
 
     private var filteredCategories: [SettingsCategory] {
-        let query = viewState.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return SettingsCategory.allCases }
+        let query = viewState.searchQuery
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return SettingsCategory.allCases
+        }
 
         return SettingsCategory.allCases.filter { category in
-            searchTerms(for: category).contains { term in
-                localizedSearchValue(term).localizedCaseInsensitiveContains(query)
-                    || term.localizedCaseInsensitiveContains(query)
-            }
-        }
-    }
-
-    private func searchTerms(for category: SettingsCategory) -> [String] {
-        switch category {
-        case .general:
-            ["General", "Appearance", "Color theme", "Appearance mode", "Language", "Projects", "Files", "Version control", "Logs", "Log directory", "Hidden paths"]
-        case .editor:
-            ["Editor", "Display", "Font", "Font size", "Search fonts", "File tree row height", "Show minimap", "Minimap", "Indentation", "Tab width"]
-        case .keymap:
-            ["Keymap", "Keyboard shortcuts", "Shortcuts", "Actions"]
-        case .project:
-            ["Project", "Java SDK", "JDK", "Project JDK", "Maven", "Maven Home", "Maven Wrapper", "Maven JDK"]
-        case .run:
-            ["Run configurations", "Program arguments", "VM options", "Environment variables", "Working directory", "Services"]
-        case .terminal:
-            ["Terminal", "Shell", "Default shell"]
-        case .lsp:
-            ["LSP", "Language server"]
-        case .ai:
-            ["AI & Commit", "Commit message", "Pull request"]
-        case .providers:
-            ["AI Providers", "AI provider", "Model", "API key", "Endpoint", "Responses", "Anthropic"]
-        case .git:
-            ["Git", "Fetch", "Tags", "Submodules", "Prune", "Commit identity", "Committer name", "Committer email", "Configuration scope", "user.name", "user.email"]
-        case .updates:
-            ["Updates", "Application version", "Update status", "Check for Updates"]
-        case .diagnostics:
-            ["Diagnostics", "Diagnostics bundle", "Export logs", "Bug report"]
-        case .plugins:
-            ["Plugins", "Installed", "Marketplace", "Language support"]
-        case .mcp:
-            ["MCP Configuration", "MCP", "Agent", "AI tool connections (MCP)", "Copy agent configuration", "Permissions"]
+            SettingsSearchVocabulary.matches(query: query, category: category) { localizedSearchValue($0) }
         }
     }
 
