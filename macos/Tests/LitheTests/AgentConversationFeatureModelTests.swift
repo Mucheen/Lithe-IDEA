@@ -9,6 +9,55 @@ import Testing
 @MainActor
 struct AgentConversationFeatureModelTests {
     @Test
+    func hostReconnectionShowsAttemptCountAndClearsOnProgressOrFailure() async throws {
+        try await withStatisticsFeature { feature, connection, clock in
+            try feature.send("Try the service")
+            try feature.receive(event("sessionCreated", ["token": connection.commands.last?["token"] as Any]))
+            let turn = feature.selectedConversation?.activeTurn
+            try feature.receive(event("turnRetrying"))
+            #expect(feature.selectedConversation?.responseStatus == .retrying)
+            #expect(feature.selectedConversation?.retryAttempt == 2)
+            #expect(feature.selectedConversation?.retryMaxAttempts == 5)
+            #expect(feature.selectedConversation?.activeTurn == turn)
+            #expect(feature.selectedConversation?.errorMessage == nil)
+            clock.advance(8)
+            try feature.receive(event("turnRetrying", ["attempt": 5]))
+            #expect(feature.selectedConversation?.retryAttempt == 5)
+            #expect(throws: AgentConversationError.sessionBusy) { try feature.send("Overlap") }
+            try feature.receive(event("agentThoughtChunk"))
+            #expect(feature.selectedConversation?.responseStatus == .thinking)
+            #expect(feature.selectedConversation?.retryAttempt == nil)
+            try feature.receive(event("requestFailed"))
+            #expect(feature.selectedConversation?.responseStatus == nil)
+            #expect(feature.selectedConversation?.retryAttempt == nil)
+            #expect(feature.selectedConversation?.completedTurns.last?.duration == 8)
+            try feature.receive(event("turnRetrying"))
+            #expect(feature.selectedConversation?.responseStatus == nil)
+            try feature.send("Next turn")
+            try feature.receive(event("turnRetrying"))
+            #expect(feature.selectedConversation?.responseStatus == .waiting)
+            try feature.receive(event("turnRetrying", ["turnId": "host-turn-2"]))
+            #expect(feature.selectedConversation?.responseStatus == .retrying)
+            feature.cancel()
+            try feature.receive(event("turnRetrying", ["turnId": "host-turn-2", "attempt": 3]))
+            #expect(feature.selectedConversation?.responseStatus == .stopping)
+        }
+    }
+
+    @Test
+    func invalidHostRetryCountsCannotInventReconnectingState() async throws {
+        try await withStatisticsFeature { feature, connection, _ in
+            try feature.send("Try the service")
+            try feature.receive(event("sessionCreated", ["token": connection.commands.last?["token"] as Any]))
+            for fields: [String: Any] in [["attempt": 0], ["attempt": 6], ["maxAttempts": 0],
+                                         ["attempt": "2"], ["turnId": ""]] {
+                try feature.receive(event("turnRetrying", fields))
+                #expect(feature.selectedConversation?.responseStatus == .waiting)
+            }
+        }
+    }
+
+    @Test
     func responseStatusUsesObservedProgressAndPermissionInsteadOfElapsedTime() async throws {
         try await withStatisticsFeature { feature, connection, clock in
             try feature.send("Create a sample")

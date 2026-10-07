@@ -171,6 +171,17 @@ impl Harness {
         harness
     }
 
+    async fn ready_claude() -> Self {
+        let mut harness = Self::start_with_route(false, Some(claude_route()));
+        let initialize = harness.agent.expect("initialize").await;
+        harness
+            .agent
+            .reply(&initialize, json!({"protocolVersion": 1}))
+            .await;
+        assert!(matches!(harness.event().await, AgentEvent::Ready { .. }));
+        harness
+    }
+
     fn send(&self, command: Value) {
         let command = serde_json::from_value(command).expect("command JSON");
         if let AgentCommand::Cancel { session_id } = &command {
@@ -266,6 +277,15 @@ fn serialized_events_match_the_shared_fixture() {
                 session_id: "session-1".into(),
                 stop_reason: "end_turn".into(),
                 usage: None,
+            },
+        ),
+        (
+            "turnRetrying",
+            AgentEvent::TurnRetrying {
+                session_id: "session-1".into(),
+                turn_id: "host-turn-1".into(),
+                attempt: 2,
+                max_attempts: 5,
             },
         ),
         (
@@ -492,6 +512,352 @@ fn claude_session_routing_clears_conflicting_credentials_and_preserves_sdk_optio
         .unwrap()
         .is_none());
     assert!(session_routing::metadata(None).unwrap().is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn claude_authentication_failure_ends_the_turn_and_allows_an_explicit_retry() {
+    let mut harness = Harness::ready_claude().await;
+    harness.open_session("session-1").await;
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+    let first = harness.agent.expect("session/prompt").await;
+    harness
+        .agent
+        .write(json!({
+            "jsonrpc": "2.0", "id": first["id"],
+            "error": {
+                "code": -32603,
+                "message": "Failed to authenticate. API Error: 401 Invalid API key",
+                "data": {"errorKind": "authentication_failed"}
+            }
+        }))
+        .await;
+    match harness.event().await {
+        AgentEvent::RequestFailed {
+            token,
+            session_id,
+            message,
+        } => {
+            assert!(token.is_none());
+            assert_eq!(session_id.as_deref(), Some("session-1"));
+            assert!(message.contains("401 Invalid API key"));
+        }
+        other => panic!("expected terminal authentication failure, got {other:?}"),
+    }
+    // Only the user's next command starts another turn, after the failed turn
+    // has released its busy state; the host never resends the rejected prompt.
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "retry"}));
+    let retry = harness.agent.expect("session/prompt").await;
+    assert_eq!(retry["params"]["prompt"][0]["text"], "retry");
+    harness
+        .agent
+        .reply(&retry, json!({"stopReason": "end_turn"}))
+        .await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnFinished { .. }
+    ));
+    assert_eq!(harness.stop().await, Ok(()));
+}
+
+async fn reject_prompt(harness: &mut Harness, request: &Value, kind: &str) {
+    harness
+        .agent
+        .write(json!({
+            "jsonrpc": "2.0", "id": request["id"],
+            "error": {"code": -32603, "message": "API Error: 503 No available channel",
+                      "data": {"errorKind": kind}}
+        }))
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_temporary_errors_attempt_five_times_without_upstream_backoff() {
+    for kind in ["rate_limit", "overloaded", "server_error", "transport_lost"] {
+        let mut harness = Harness::ready_claude().await;
+        harness.open_session("session-1").await;
+        harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+        for attempt in 1..=5 {
+            let request = harness.agent.expect("session/prompt").await;
+            assert_eq!(request["params"]["prompt"][0]["text"], "first");
+            reject_prompt(&mut harness, &request, kind).await;
+            harness.agent.expect("session/cancel").await;
+            if attempt < 5 {
+                match harness.event().await {
+                    AgentEvent::TurnRetrying {
+                        session_id,
+                        attempt: next,
+                        max_attempts,
+                        ..
+                    } => {
+                        assert_eq!(session_id, "session-1");
+                        assert_eq!(next, attempt + 1);
+                        assert_eq!(max_attempts, 5);
+                    }
+                    other => panic!("retry before final failure: {other:?}"),
+                }
+                tokio::time::advance(Duration::from_millis(500 << (attempt - 1))).await;
+            } else {
+                assert!(matches!(
+                    harness.event().await,
+                    AgentEvent::RequestFailed { .. }
+                ));
+            }
+        }
+        harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "explicit retry"}));
+        let retry = harness.agent.expect("session/prompt").await;
+        harness
+            .agent
+            .reply(&retry, json!({"stopReason": "end_turn"}))
+            .await;
+        assert!(matches!(
+            harness.event().await,
+            AgentEvent::TurnFinished { .. }
+        ));
+        assert_eq!(harness.stop().await, Ok(()));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_permanent_and_unknown_errors_never_automatically_retry() {
+    for kind in [
+        "authentication_failed",
+        "invalid_request",
+        "model_not_found",
+        "billing_error",
+        "verification_required",
+        "unknown",
+    ] {
+        let mut harness = Harness::ready_claude().await;
+        harness.open_session("session-1").await;
+        harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+        let first = harness.agent.expect("session/prompt").await;
+        reject_prompt(&mut harness, &first, kind).await;
+        assert!(matches!(
+            harness.event().await,
+            AgentEvent::RequestFailed { .. }
+        ));
+        assert_eq!(harness.stop().await, Ok(()));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_air_terminal_failure_is_not_success_and_can_recover() {
+    let mut harness = Harness::ready_claude().await;
+    harness.open_session("session-1").await;
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+    let first = harness.agent.expect("session/prompt").await;
+    harness
+        .agent
+        .reply(
+            &first,
+            fixture()["upstream"]["claudeTemporaryFailureResponse"].clone(),
+        )
+        .await;
+    harness.agent.expect("session/cancel").await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnRetrying { attempt: 2, .. }
+    ));
+    tokio::time::advance(Duration::from_millis(500)).await;
+    let retry = harness.agent.expect("session/prompt").await;
+    harness
+        .agent
+        .reply(&retry, json!({"stopReason": "end_turn"}))
+        .await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnFinished { .. }
+    ));
+    assert_eq!(harness.stop().await, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_generic_air_service_errors_cannot_retry_permanent_http_statuses() {
+    for status in [400, 401, 402, 403, 404, 413, 422] {
+        let mut harness = Harness::ready_claude().await;
+        harness.open_session("session-1").await;
+        harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+        let first = harness.agent.expect("session/prompt").await;
+        let mut response = fixture()["upstream"]["claudeTemporaryFailureResponse"].clone();
+        response["_meta"]["jetbrains"]["air"]["sessionFailure"]["title"] =
+            json!(format!("API Error: {status} Request rejected"));
+        harness.agent.reply(&first, response).await;
+        match harness.event().await {
+            AgentEvent::RequestFailed { message, .. } => {
+                assert!(message.contains(&status.to_string()));
+                assert!(
+                    !message.contains("sessionFailure"),
+                    "incident JSON stays internal"
+                );
+            }
+            other => panic!("expected terminal failure, got {other:?}"),
+        }
+        assert_eq!(harness.stop().await, Ok(()));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_auth_failure_preserves_air_details_without_starting_account_login() {
+    let mut harness = Harness::ready_claude().await;
+    harness.open_session("session-1").await;
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+    let first = harness.agent.expect("session/prompt").await;
+    let update = fixture()["events"]["claudeSessionFailure"]["update"].clone();
+    harness.agent.write(json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-1", "update": update}})).await;
+    assert!(matches!(harness.event().await, AgentEvent::Update { .. }));
+    reject_prompt(&mut harness, &first, "authentication_failed").await;
+    assert!(
+        matches!(harness.event().await, AgentEvent::RequestFailed { message, .. } if message.contains("401 Invalid API key"))
+    );
+    assert_eq!(harness.stop().await, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn responses_agent_errors_keep_their_upstream_retry_policy() {
+    let mut harness = Harness::ready().await;
+    harness.open_session("session-1").await;
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+    let first = harness.agent.expect("session/prompt").await;
+    reject_prompt(&mut harness, &first, "server_error").await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::RequestFailed { .. }
+    ));
+    assert_eq!(harness.stop().await, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_cancel_during_backoff_finishes_without_resending() {
+    let mut harness = Harness::ready_claude().await;
+    harness.open_session("session-1").await;
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+    let first = harness.agent.expect("session/prompt").await;
+    reject_prompt(&mut harness, &first, "server_error").await;
+    harness.agent.expect("session/cancel").await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnRetrying { .. }
+    ));
+    harness.send(json!({"kind": "cancel", "sessionId": "session-1"}));
+    harness.agent.expect("session/cancel").await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnCancelling { .. }
+    ));
+    assert!(
+        matches!(harness.event().await, AgentEvent::TurnFinished { stop_reason, .. } if stop_reason == "cancelled")
+    );
+    assert_eq!(harness.stop().await, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_stalled_reconnection_cancels_within_twenty_seconds_before_unlocking() {
+    let mut harness = Harness::ready_claude().await;
+    harness.open_session("session-1").await;
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+    let first = harness.agent.expect("session/prompt").await;
+    reject_prompt(&mut harness, &first, "server_error").await;
+    harness.agent.expect("session/cancel").await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnRetrying { .. }
+    ));
+    tokio::time::advance(Duration::from_millis(500)).await;
+    let retry = harness.agent.expect("session/prompt").await;
+    tokio::time::advance(prompt_retry::RETRY_WINDOW).await;
+    harness.agent.expect("session/cancel").await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnCancelling { .. }
+    ));
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "overlap"}));
+    assert!(
+        matches!(harness.event().await, AgentEvent::RequestFailed { message, .. } if message.contains("still responding"))
+    );
+    harness
+        .agent
+        .reply(&retry, json!({"stopReason": "cancelled"}))
+        .await;
+    assert!(
+        matches!(harness.event().await, AgentEvent::RequestFailed { message, .. } if message.contains("20 seconds") && message.contains("503"))
+    );
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "next"}));
+    let next = harness.agent.expect("session/prompt").await;
+    harness
+        .agent
+        .reply(&next, json!({"stopReason": "end_turn"}))
+        .await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnFinished { .. }
+    ));
+    assert_eq!(harness.stop().await, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_unacknowledged_retry_timeout_closes_the_connection_after_cancel_grace() {
+    let mut harness = Harness::ready_claude().await;
+    harness.open_session("session-1").await;
+    harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+    let first = harness.agent.expect("session/prompt").await;
+    reject_prompt(&mut harness, &first, "server_error").await;
+    harness.agent.expect("session/cancel").await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnRetrying { .. }
+    ));
+    tokio::time::advance(Duration::from_millis(500)).await;
+    harness.agent.expect("session/prompt").await;
+    tokio::time::advance(prompt_retry::RETRY_WINDOW).await;
+    harness.agent.expect("session/cancel").await;
+    assert!(matches!(
+        harness.event().await,
+        AgentEvent::TurnCancelling { .. }
+    ));
+    assert!(
+        harness.events.try_recv().is_err(),
+        "no terminal event before cancellation grace"
+    );
+    tokio::time::advance(CANCEL_TIMEOUT).await;
+    assert!(
+        matches!(harness.event().await, AgentEvent::RequestFailed { message, .. } if message.contains("20 seconds"))
+    );
+    let result = tokio::time::timeout(WAIT, &mut harness.connection)
+        .await
+        .expect("connection closes within its local deadline")
+        .expect("connection task completes");
+    assert!(result.unwrap_err().contains("did not acknowledge Stop"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_progress_ends_the_retry_window_and_prevents_whole_turn_replay() {
+    for update in [
+        json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial"}}),
+        json!({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "reasoning"}}),
+        json!({"sessionUpdate": "tool_call", "toolCallId": "tool-1", "title": "Execute", "kind": "execute"}),
+    ] {
+        let mut harness = Harness::ready_claude().await;
+        harness.open_session("session-1").await;
+        harness.send(json!({"kind": "prompt", "sessionId": "session-1", "text": "first"}));
+        let first = harness.agent.expect("session/prompt").await;
+        reject_prompt(&mut harness, &first, "server_error").await;
+        harness.agent.expect("session/cancel").await;
+        assert!(matches!(
+            harness.event().await,
+            AgentEvent::TurnRetrying { .. }
+        ));
+        tokio::time::advance(Duration::from_millis(500)).await;
+        let retry = harness.agent.expect("session/prompt").await;
+        harness.agent.write(json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "session-1", "update": update}})).await;
+        assert!(matches!(harness.event().await, AgentEvent::Update { .. }));
+        tokio::time::advance(prompt_retry::RETRY_WINDOW + Duration::from_secs(1)).await;
+        reject_prompt(&mut harness, &retry, "server_error").await;
+        assert!(matches!(
+            harness.event().await,
+            AgentEvent::RequestFailed { .. }
+        ));
+        assert_eq!(harness.stop().await, Ok(()));
+    }
 }
 
 #[test]

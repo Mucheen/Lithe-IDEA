@@ -11,6 +11,7 @@ pub mod cli_update;
 pub mod environment;
 pub mod install;
 mod prompt;
+mod prompt_retry;
 mod session_defaults;
 mod session_routing;
 mod subscription;
@@ -437,6 +438,13 @@ pub enum AgentEvent {
         request_id: String,
         request: serde_json::Value,
     },
+    /// A temporary failure ended one attempt; the same busy turn is reconnecting.
+    TurnRetrying {
+        session_id: String,
+        turn_id: String,
+        attempt: u32,
+        max_attempts: u32,
+    },
     /// The agent acknowledged the prompt's completion, including cancellation.
     TurnFinished {
         session_id: String,
@@ -474,6 +482,7 @@ type RunningTurns = Arc<Mutex<HashMap<String, RunningTurn>>>;
 struct RunningTurn {
     generation: u64,
     cancelling: bool,
+    retry: tokio::sync::watch::Sender<prompt_retry::State>,
 }
 
 enum Control {
@@ -843,6 +852,7 @@ where
     let (auth_tx, mut auth_rx) = tokio::sync::watch::channel(None::<subscription::AuthStatus>);
     let turns: RunningTurns = Arc::new(Mutex::new(HashMap::new()));
     let updates = emit.clone();
+    let update_turns = turns.clone();
     let requests = emit.clone();
     let permission_turns = turns.clone();
     let cancel_permissions = permissions.clone();
@@ -860,8 +870,17 @@ where
         .on_receive_notification(
             async move |notification: SessionNotification, _| {
                 if let Ok(update) = serde_json::to_value(notification.update) {
+                    let session_id = notification.session_id.0.to_string();
+                    if let Ok(turns) = update_turns.lock() {
+                        if let Some(turn) = turns.get(&session_id) {
+                            turn.retry.send_modify(|state| {
+                                if prompt_retry::is_progress(&update) { state.progress(); }
+                                state.observe_failure(&update);
+                            });
+                        }
+                    }
                     updates(AgentEvent::Update {
-                        session_id: notification.session_id.0.to_string(),
+                        session_id,
                         update,
                     });
                 }
@@ -880,7 +899,10 @@ where
                     Ok(mut pending) => {
                         let running = permission_turns
                             .lock()
-                            .is_ok_and(|turns| turns.get(&session_id).is_some_and(|turn| !turn.cancelling));
+                            .is_ok_and(|turns| turns.get(&session_id).is_some_and(|turn| {
+                                turn.retry.send_modify(|state| state.progress());
+                                !turn.cancelling
+                            }));
                         if running {
                             pending.insert(
                                 request_id.clone(),
@@ -933,8 +955,10 @@ where
         // forever and the UI never learns the connection is gone.
         .on_close(async |_| Err(internal("The Agent exited")))
         .connect_with(transport, |connection: ConnectionTo<Agent>| async move {
-            // Negotiate only the upstream recommendation extension we consume;
-            // this namespace does not change product branding or permissions.
+            // The public Claude failure extension keeps synthetic API errors
+            // distinct from model output and carries their actionable titles.
+            let claude_api_key = gateway.as_ref().is_some_and(|route| route.protocol == ProviderProtocol::AnthropicMessages);
+            let air_capabilities = if claude_api_key { vec!["recommendedValue", "sessionFailure"] } else { vec!["recommendedValue"] };
             let capabilities = ClientCapabilities::new()
                 .auth(AuthCapabilities::new().meta(serde_json::Map::from_iter([(
                     GATEWAY_AUTH_METHOD.to_owned(),
@@ -942,7 +966,7 @@ where
                 )])))
                 .meta(serde_json::Map::from_iter([(
                     "jetbrains".to_owned(),
-                    serde_json::json!({ "air": { "version": 1, "capabilities": ["recommendedValue"] } }),
+                    serde_json::json!({ "air": { "version": 1, "capabilities": air_capabilities } }),
                 )]));
             let initialized = tokio::time::timeout(
                 HANDSHAKE_TIMEOUT,
@@ -1135,9 +1159,11 @@ where
                             }
                         };
                         let generation = generations.fetch_add(1, Ordering::SeqCst) + 1;
+                        let retry_enabled = gateway.as_ref().is_some_and(|route| route.protocol == ProviderProtocol::AnthropicMessages);
+                        let (retry, retry_changes) = tokio::sync::watch::channel(prompt_retry::State::new(retry_enabled));
                         let busy = match turns.lock() {
                             Ok(mut turns) if !turns.contains_key(&session_id) => {
-                                turns.insert(session_id.clone(), RunningTurn { generation, cancelling: false });
+                                turns.insert(session_id.clone(), RunningTurn { generation, cancelling: false, retry: retry.clone() });
                                 false
                             }
                             _ => true,
@@ -1152,14 +1178,15 @@ where
                         }
                         let request = PromptRequest::new(session_id.clone(), content);
                         let connection = connection.clone();
-                        let mut response = Box::pin(connection.send_request(request).block_task());
+                        let mut response = Box::pin(prompt_retry::run(connection.clone(), request, retry.clone(), retry_changes.clone(), uuid::Uuid::new_v4().to_string(), emit.clone()));
                         let emit = emit.clone();
                         let turns = turns.clone();
                         let prompt_permissions = cancel_permissions.clone();
                         let cancel_deadline = cancel_deadline_tx.clone();
                         tasks.spawn(async move {
-                            let result = tokio::time::timeout(PROMPT_TIMEOUT, response.as_mut()).await;
+                            let result = prompt_retry::wait(response.as_mut(), retry_changes).await;
                             if result.is_err() {
+                                let timeout_message = retry.borrow().timeout_message();
                                 // Treat an expired prompt like a cancellation, but keep the
                                 // turn registered until the agent acknowledges it. This
                                 // prevents a late upstream response from overlapping a new
@@ -1172,6 +1199,7 @@ where
                                         return false;
                                     }
                                     turn.cancelling = true;
+                                    turn.retry.send_modify(|state| state.cancelling = true);
                                     true
                                 });
                                 if !current {
@@ -1206,7 +1234,7 @@ where
                                             emit(failed(
                                                 None,
                                                 Some(session_id),
-                                                PROMPT_TIMEOUT_MESSAGE.into(),
+                                                timeout_message,
                                             ));
                                         }
                                     }
@@ -1217,7 +1245,7 @@ where
                                         emit(failed(
                                             None,
                                             Some(session_id.clone()),
-                                            PROMPT_TIMEOUT_MESSAGE.into(),
+                                            timeout_message,
                                         ));
                                         let _ = cancel_deadline.send((session_id, generation));
                                     }
@@ -1240,7 +1268,7 @@ where
                             reject_pending_permissions(&prompt_permissions, Some(&session_id));
                             emit(match result {
                                 Ok(Ok(response)) => prompt::finished(session_id, response),
-                                Ok(Err(error)) => failed(None, Some(session_id), error.to_string()),
+                                Ok(Err(error)) => failed(None, Some(session_id), prompt_retry::error_message(&error)),
                                 Err(_) => unreachable!("prompt timeout handled above"),
                             });
                         });
@@ -1253,6 +1281,7 @@ where
                                 let turn = turns.get_mut(&session_id)?;
                                 if turn.cancelling { return None; }
                                 turn.cancelling = true;
+                                turn.retry.send_modify(|state| state.cancelling = true);
                                 Some(turn.generation)
                             });
                         // A request registered after the caller's rejection but before
