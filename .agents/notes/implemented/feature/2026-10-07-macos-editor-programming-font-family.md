@@ -153,6 +153,11 @@ adapter 写到 Caches/Application Support，不能写安装目录。
 - 弹层高度按可见行数收缩；面板本身仍是 `LitheSettingsSelectPopupPresenter`，所以
   ↑/↓、Return、Esc、点击空白关闭等既有键盘行为不变。
 - 输入法组合期间（`hasMarkedText`）不拦截导航键，否则中文拼音会被 Return 提前确认。
+- 交互层由 `SearchableSettingsSelectTests` 用真实窗口与真实按键覆盖：过滤后弹层收缩、Return 应用
+  过滤后高亮的那一行、↑/↓ 在过滤结果内移动、清空搜索恢复全部行、无结果时弹层收缩且 Return 不
+  改变选择、Esc 关闭且不应用、组合输入期间 Return 不提交。
+- 无结果提示的**可见文案不写成断言**：SwiftUI 的 `Text` 不通过 `NSView` 暴露字符串，视图树检索
+  只会测到框架内部实现。该文案属于能力矩阵里的实机视觉验收。
 
 ## 考虑过的备选方案
 
@@ -200,6 +205,7 @@ IDEA 的编辑器字体组合框确实有这个开关，功能上更完整。本
 
 - `./.agents/skills/write-stable-tests/scripts/test-stability-macos.sh -- --filter EditorFontFamilyTests`
 - `./.agents/skills/write-stable-tests/scripts/test-stability-macos.sh -- --filter SettingsSearchVocabularyTests`
+- `./.agents/skills/write-stable-tests/scripts/test-stability-macos.sh -- --filter SearchableSettingsSelectTests`
 - `./.agents/skills/write-stable-tests/scripts/test-stability-macos.sh -- --filter AgentActivityPresentationTests`
 - `./scripts/test-macos.sh`
 - `./scripts/verify-platform-feature-matrix.sh`
@@ -227,4 +233,5 @@ IDEA 的编辑器字体组合框确实有这个开关，功能上更完整。本
 - `macos/Sources/Lithe/Views/Agent/AgentFileDiffView.swift`
 - `macos/Tests/LitheTests/EditorFontFamilyTests.swift`
 - `macos/Tests/LitheTests/SettingsSearchVocabularyTests.swift`
+- `macos/Tests/LitheTests/SearchableSettingsSelectTests.swift`
 - `shared/platform-feature-matrix/features/editor-font-family.json`

@@ -19,7 +19,8 @@
       "macos/Sources/Lithe/Views/Git/BranchComparisonView.swift",
       "macos/Sources/Lithe/Views/App/SettingsSearchVocabulary.swift",
       "macos/Tests/LitheTests/EditorFontFamilyTests.swift",
-      "macos/Tests/LitheTests/SettingsSearchVocabularyTests.swift"
+      "macos/Tests/LitheTests/SettingsSearchVocabularyTests.swift",
+      "macos/Tests/LitheTests/SearchableSettingsSelectTests.swift"
     ]
   },
   "windows": {
