@@ -16,6 +16,10 @@ final class SettingsViewState: ObservableObject {
     @Published var isFormatPickerPresented = false
     @Published var detectedTerminalShells: [String] = []
     @Published var knownTerminalShells: [String] = []
+    /// Monospaced families offered by Settings › Editor › Font. Discovered once
+    /// per settings window because enumerating and measuring system fonts is
+    /// expensive; the catalog itself caches the result for the process.
+    @Published var editorFontFamilies: [String] = []
     @Published var pendingPluginEnabledStates: [PluginID: Bool] = [:]
     @Published private(set) var isApplyingPluginChanges = false
 
@@ -277,7 +281,7 @@ struct SettingsView: View {
         case .general:
             ["General", "Appearance", "Color theme", "Appearance mode", "Language", "Projects", "Files", "Version control", "Logs", "Log directory", "Hidden paths"]
         case .editor:
-            ["Editor", "Display", "Editor tabs", "Font size", "File tree row height", "Show minimap", "Minimap", "Indentation", "Tab width"]
+            ["Editor", "Display", "Font", "Font size", "Search fonts", "File tree row height", "Show minimap", "Minimap", "Indentation", "Tab width"]
         case .keymap:
             ["Keymap", "Keyboard shortcuts", "Shortcuts", "Actions"]
         case .project:
@@ -684,6 +688,19 @@ struct SettingsView: View {
     private var editorSettings: some View {
         VStack(alignment: .leading, spacing: 18) {
             group("Display") {
+                row("Font") {
+                    LitheSettingsSelect(
+                        selection: $settings.editorFontFamily,
+                        options: editorFontOptions,
+                        width: 240,
+                        accessibilityLabel: "Font",
+                        title: { $0 },
+                        localizesTitles: false,
+                        isAvailable: { MacEditorFontCatalog.isAvailable(family: $0) },
+                        searchPrompt: "Search fonts",
+                        searchText: { $0 }
+                    )
+                }
                 row("Font size") {
                     LitheSettingsStepper(
                         value: $settings.editorFontSize,
@@ -736,6 +753,20 @@ struct SettingsView: View {
                 }
             }
         }
+        .task {
+            guard viewState.editorFontFamilies.isEmpty else { return }
+            viewState.editorFontFamilies = MacEditorFontCatalog.editorFamilies()
+        }
+    }
+
+    /// Monospaced families plus the stored selection. The stored family is kept
+    /// in the list even when it is no longer installed, so the user can see what
+    /// is configured instead of the control silently snapping to the default.
+    private var editorFontOptions: [String] {
+        var options = viewState.editorFontFamilies
+        if options.isEmpty { options = [settings.editorFontFamily] }
+        if !options.contains(settings.editorFontFamily) { options.append(settings.editorFontFamily) }
+        return options
     }
 
     private var terminalSettings: some View {

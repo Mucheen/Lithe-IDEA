@@ -3,6 +3,7 @@ import LitheLocalHistoryModule
 
 struct LocalHistoryView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var settings: AppSettings
     let request: LocalHistoryRequest
     @State private var isRestoreConfirmationPresented = false
 
@@ -164,7 +165,8 @@ struct LocalHistoryView: View {
                 DiffPaneView(
                     rows: model.localHistoryDiffRows,
                     fileExtension: request.fileURL.pathExtension,
-                    minimumWidth: 860
+                    minimumWidth: 860,
+                    fontFamily: settings.editorFontFamily
                 )
             }
         }

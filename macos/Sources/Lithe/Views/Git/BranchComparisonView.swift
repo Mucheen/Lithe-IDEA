@@ -3,6 +3,7 @@ import LitheGitModule
 
 struct BranchComparisonView: View {
     @ObservedObject var feature: GitFeatureModel
+    @EnvironmentObject private var settings: AppSettings
     let comparison: GitBranchComparison
     let onRefresh: () async -> Void
 
@@ -206,7 +207,8 @@ struct BranchComparisonView: View {
             } else {
                 DiffPaneView(
                     rows: feature.branchComparisonRows,
-                    fileExtension: selectedFileExtension
+                    fileExtension: selectedFileExtension,
+                    fontFamily: settings.editorFontFamily
                 )
             }
         }

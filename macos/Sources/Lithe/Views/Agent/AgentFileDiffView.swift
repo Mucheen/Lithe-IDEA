@@ -8,6 +8,7 @@ import LitheGitModule
 struct AgentFileDiffView: View {
     let change: AgentFileChange
     let onOpenFile: (AgentToolDetails.Location) -> Void
+    @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
     @State private var selectedIndex = 0
 
@@ -28,7 +29,7 @@ struct AgentFileDiffView: View {
             Text("Agent-reported changes; excerpts may not include the entire file.")
                 .font(LitheTheme.uiFont(size: 11)).foregroundStyle(LitheTheme.secondaryText).padding(.bottom, 8)
             if change.diffs.indices.contains(selectedIndex) {
-                AgentReportedDiffView(diff: change.diffs[selectedIndex])
+                AgentReportedDiffView(diff: change.diffs[selectedIndex], fontFamily: settings.editorFontFamily)
             }
         }
         .frame(minWidth: 600, idealWidth: 860, minHeight: 360, idealHeight: 560)
@@ -38,6 +39,7 @@ struct AgentFileDiffView: View {
 
 private struct AgentReportedDiffView: View {
     let diff: AgentToolDetails.Diff
+    var fontFamily: String = EditorFontDefaults.monospacedFamily
     var body: some View {
         VStack(spacing: 0) {
             if diff.isTruncated {
@@ -46,7 +48,8 @@ private struct AgentReportedDiffView: View {
             }
             if withinComparisonBudget {
                 DiffPaneView(rows: LocalHistoryDiffBuilder.rows(old: diff.oldText ?? "", current: diff.newText).map(DiffRow.init),
-                             fileExtension: (diff.path as NSString).pathExtension, minimumWidth: 600)
+                             fileExtension: (diff.path as NSString).pathExtension, minimumWidth: 600,
+                             fontFamily: fontFamily)
             } else {
                 Text("This diff has too many lines for comparison. Showing the reported before and after text.")
                     .font(LitheTheme.uiFont(size: 11)).foregroundStyle(LitheTheme.secondaryText).padding(8)
