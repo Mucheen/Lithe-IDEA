@@ -41,6 +41,7 @@ function notification(count: number): NotificationEntry {
     updatedAt: 0,
     read: false,
     count,
+    sources: [["toast-1", count]],
   };
 }
 
