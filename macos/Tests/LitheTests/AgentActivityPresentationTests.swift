@@ -82,7 +82,7 @@ struct AgentActivityPresentationTests {
                 // Each segment occupies one third of the bar inside its 18pt margins.
                 let point = NSPoint(x: 18 + 284 * (CGFloat(index) + 0.5) / 3, y: 60)
                 try click(point, in: host, window: window)
-                let popup = try #require(await waitForPopup(excluding: initialWindows), "The \(panel.rawValue) segment must open a native panel")
+                let popup = try #require(await waitForPopup(excluding: initialWindows, updating: host), "The \(panel.rawValue) segment must open a native panel")
                 let content = try #require(popup.contentView)
                 #expect(abs(popup.frame.width - 284) < 1, "Every panel follows the activity bar's width")
                 try capture(content, name: "activity-\(panel.rawValue)-\(scheme)")
@@ -121,7 +121,7 @@ struct AgentActivityPresentationTests {
             for (index, panel) in AgentActivitySummaryBar.Panel.allCases.enumerated() {
                 host.layoutSubtreeIfNeeded()
                 try click(NSPoint(x: 18 + (width - 36) * (Double(index) + 0.5) / 3, y: 140), in: host, window: window)
-                let popup = try #require(await waitForPopup(excluding: initialWindows))
+                let popup = try #require(await waitForPopup(excluding: initialWindows, updating: host))
                 #expect(abs(popup.frame.width - (width - 36)) < 1)
                 #expect(abs(popup.frame.minX - window.frame.minX - 18) < 1)
                 #expect(abs(popup.frame.minY - window.frame.minY - 36) < 1, "The card opens immediately above the bar")
@@ -183,7 +183,7 @@ struct AgentActivityPresentationTests {
             for (index, panel) in AgentActivitySummaryBar.Panel.allCases.enumerated() {
                 host.layoutSubtreeIfNeeded()
                 try click(NSPoint(x: 18 + 284 * (CGFloat(index) + 0.5) / 3, y: 380), in: host, window: window)
-                let popup = try #require(await waitForPopup(excluding: initialWindows))
+                let popup = try #require(await waitForPopup(excluding: initialWindows, updating: host))
                 #expect(abs(popup.frame.width - 284) < 1)
                 #expect(popup.frame.height <= 260, "Long lists use an internal viewport instead of a tall outer card")
                 let content = try #require(popup.contentView)
@@ -215,7 +215,17 @@ struct AgentActivityPresentationTests {
         return view.subviews.lazy.compactMap { nativeButton(in: $0, titles: titles) }.first
     }
 
-    private func waitForPopup(excluding windows: Set<ObjectIdentifier>) async -> NSWindow? {
+    private func waitForPopup(excluding windows: Set<ObjectIdentifier>, updating host: NSView? = nil) async -> NSWindow? {
+        if let host {
+            // Segment switches reuse a visible popup. Finish the parent layout
+            // that submits its update, then observe delivery on the main queue
+            // before reading/clicking the updated native content.
+            host.needsLayout = true
+            host.layoutSubtreeIfNeeded()
+            var updateDelivered = false
+            DispatchQueue.main.async { updateDelivered = true }
+            guard await waitUntil({ updateDelivered }) else { return nil }
+        }
         func popup() -> NSWindow? { NSApp.windows.first { !windows.contains(ObjectIdentifier($0)) && $0.isVisible } }
         _ = await waitUntil { popup() != nil }
         return popup()
