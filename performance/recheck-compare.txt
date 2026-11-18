@@ -1,0 +1,38 @@
+16 of 16 benchmarks have a base result
+REGRESSION BenchmarkEditorSyntaxViewportCold/go/100KiB: 632 allocs/op, was 631
+REGRESSION BenchmarkEditorSyntaxViewportCold/markdown/10MiB: 655 allocs/op, was 651
+REGRESSION BenchmarkEditorViewType/longline-wrap/10MiB: 92563 ns/op, 19% above the median 77634 of the last 1 runs
+perfhistory: 3 regressions
+exit status 1
+perfhistory found regressions; this is a report, not a gate
+# Editor performance report
+
+- Machine: darwin/arm64, Apple M5
+- Reference machine: m4-mbp (physical), Apple M4
+- Time budgets: not judged: CPU differs from the reference machine
+- Large size: 10MiB
+- Base machine: darwin/arm64, Apple M5
+
+Summary: 16 results, 12 within budget, 1 over budget, 0 without budget, 3 not judged
+
+| Benchmark | ns/op | B/op | allocs/op | extra metrics | vs base | Budget |
+| --- | ---: | ---: | ---: | --- | --- | --- |
+| BenchmarkEditorSyntaxViewportCold/go/100KiB | 861 µs (not judged: CPU differs from the reference machine) | 141 KiB | 629 |  | -2.8% ns/op, allocs -1 | — not judged |
+| BenchmarkEditorSyntaxViewportCold/go/10MiB | 934 µs (not judged: CPU differs from the reference machine) | 259 KiB | 756 |  | -1.6% ns/op, allocs = | ✅ within (scale 1.08x vs 100KiB <= 2x) |
+| BenchmarkEditorSyntaxViewportCold/java/100KiB | 705 µs (not judged: CPU differs from the reference machine) | 455 KiB | 544 |  | -0.5% ns/op, allocs = | — not judged |
+| BenchmarkEditorSyntaxViewportCold/java/10MiB | 702 µs (not judged: CPU differs from the reference machine) | 447 KiB | 447 |  | -1.4% ns/op, allocs -1 | ✅ within (scale 1.00x vs 100KiB <= 2x) |
+| BenchmarkEditorSyntaxViewportCold/markdown/100KiB | 779 µs (not judged: CPU differs from the reference machine) | 929 KiB | 601 |  | -1.4% ns/op, allocs -3 | — not judged |
+| BenchmarkEditorSyntaxViewportCold/markdown/10MiB | 801 µs (not judged: CPU differs from the reference machine) | 930 KiB | 649.5 |  | -0.2% ns/op, allocs +2 | ✅ within (scale 1.03x vs 100KiB <= 2x) |
+| BenchmarkEditorSyntaxViewportWarm/go/100KiB | 1.16 µs (not judged: CPU differs from the reference machine) | 0 B | 0 |  | -3.9% ns/op, allocs = | ✅ within |
+| BenchmarkEditorSyntaxViewportWarm/go/10MiB | 1.25 µs (not judged: CPU differs from the reference machine) | 0 B | 0 |  | +0.2% ns/op, allocs = | ✅ within (scale 1.08x vs 100KiB <= 1.5x) |
+| BenchmarkEditorSyntaxViewportWarm/java/100KiB | 1.2 µs (not judged: CPU differs from the reference machine) | 0 B | 0 |  | -0.5% ns/op, allocs = | ✅ within |
+| BenchmarkEditorSyntaxViewportWarm/java/10MiB | 1.15 µs (not judged: CPU differs from the reference machine) | 0 B | 0 |  | -0.2% ns/op, allocs = | ✅ within (scale 0.96x vs 100KiB <= 1.5x) |
+| BenchmarkEditorSyntaxViewportWarm/markdown/100KiB | 1.12 µs (not judged: CPU differs from the reference machine) | 0 B | 0 |  | -4.5% ns/op, allocs = | ✅ within |
+| BenchmarkEditorSyntaxViewportWarm/markdown/10MiB | 1.1 µs (not judged: CPU differs from the reference machine) | 0 B | 0 |  | -2.0% ns/op, allocs = | ✅ within (scale 0.98x vs 100KiB <= 1.5x) |
+| BenchmarkEditorViewType/go/100KiB | 50.1 µs (not judged: CPU differs from the reference machine) | 2.72 KiB | 7 |  | +2.4% ns/op, allocs = | ✅ within |
+| BenchmarkEditorViewType/go/10MiB | 45.7 µs (not judged: CPU differs from the reference machine) | 4.64 KiB | 31 |  | -0.5% ns/op, allocs = | ✅ within (scale 0.91x vs 100KiB <= 2x) |
+| BenchmarkEditorViewType/longline-wrap/100KiB | 39 µs (not judged: CPU differs from the reference machine) | 2.07 KiB | 9 |  | +0.2% ns/op, allocs = | ✅ within |
+| BenchmarkEditorViewType/longline-wrap/10MiB | 92.6 µs (not judged: CPU differs from the reference machine) | 2.78 KiB | 16 |  | +19.2% ns/op, allocs = | ⚠️ over: scale 2.37x vs 100KiB > 2x |
+
+This report never fails the build; overruns are findings to fix or to justify in the PR.
+
