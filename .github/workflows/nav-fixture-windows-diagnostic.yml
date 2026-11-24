@@ -1,0 +1,73 @@
+name: Windows navigation fixture comparison
+
+on:
+  push:
+    branches: ["codex/nav-fixture-windows-diagnostic"]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-navigation:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    env:
+      NAV_TESTS: "^(TestEditorNavigationGutterClickAnchorsPopupAndSuppressesStartingToast|TestImplementationFallbackToGutterAndSuperShortcutAndContextMenu|TestFileURILocalPathNormalizesWindowsAndPOSIX)$"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 4
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: Ensure MinGW-w64
+        run: |
+          if ! command -v gcc >/dev/null 2>&1; then
+            choco install mingw -y
+            gcc_path="$(find /c/ProgramData/chocolatey/lib/mingw /c/tools/mingw64 /c/mingw64 -type f -name gcc.exe -print -quit 2>/dev/null || true)"
+            test -n "$gcc_path"
+            printf '%s\n' "$(cygpath -m "$(dirname "$gcc_path")")" >> "$GITHUB_PATH"
+          fi
+      - name: Reproduce the two Windows fixture failures
+        run: |
+          set -o pipefail
+          editor=desktop/internal/workbench/editoractions_test.go
+          semantics=desktop/internal/workbench/pluginsemantics_test.go
+          trap 'git restore --worktree -- "$editor" "$semantics"' EXIT
+          git show 196dc02ea141c64abb302668e22bbf3f765c38c6:"$editor" > "$editor"
+          git show 196dc02ea141c64abb302668e22bbf3f765c38c6:"$semantics" > "$semantics"
+          if ./scripts/desktop/desktop-go.sh test -tags dev ./internal/workbench -run "$NAV_TESTS" -v -count=1 -timeout=80s 2>&1 | tee baseline.log; then
+            echo "The baseline unexpectedly passed."
+            exit 1
+          fi
+          grep -q -- '--- FAIL: TestEditorNavigationGutterClickAnchorsPopupAndSuppressesStartingToast' baseline.log
+          grep -q -- '--- FAIL: TestImplementationFallbackToGutterAndSuperShortcutAndContextMenu' baseline.log
+      - name: Time the corrected Windows fixtures
+        run: |
+          bash_native="$(cygpath -m "$(command -v bash)")"
+          case "$bash_native" in
+            *.[Ee][Xx][Ee]) ;;
+            *) bash_native="$bash_native.exe" ;;
+          esac
+          node .agents/skills/write-stable-tests/scripts/run-go-tests-with-timing.mjs \
+            --report .artifacts/test-stability/windows-navigation-uri.json --suite-timeout-ms 180000 -- \
+            "$bash_native" scripts/desktop/desktop-go.sh test -tags dev -json -count=1 -timeout=120s \
+            -run "$NAV_TESTS" ./internal/workbench
+          ./scripts/desktop/desktop-go.sh test -tags dev ./internal/workbench -run "$NAV_TESTS" -count=12 -timeout=3m
+          ./scripts/desktop/desktop-go.sh test ./internal/pluginservice -run '^TestWorkspaceWatch' -count=10 -timeout=2m
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-navigation-uri-evidence
+          path: |
+            baseline.log
+            .artifacts/test-stability/windows-navigation-uri.*
+          if-no-files-found: warn
+          retention-days: 7
