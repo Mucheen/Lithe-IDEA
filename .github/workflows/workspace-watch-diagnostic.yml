@@ -16,6 +16,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 4
       - uses: actions/setup-go@v7
         with:
           go-version-file: desktop/go.mod
@@ -36,7 +38,7 @@ jobs:
         run: |
           test_path=desktop/internal/pluginservice/hostworkspacewatch_test.go
           trap 'git restore --worktree -- "$test_path"' EXIT
-          git show HEAD~2:"$test_path" > "$test_path"
+          git show 1ad00fe0e387b801206bded25dd8eeee0fdacf23:"$test_path" > "$test_path"
           ./scripts/desktop/desktop-go.sh test ./internal/pluginservice -run '^TestWorkspaceWatchUsesNativeEventsAndReleasesOwnedSubscriptions$' -v -count=5 -timeout=4m
       - name: Test isolated change events and subscription disposal
         run: |
