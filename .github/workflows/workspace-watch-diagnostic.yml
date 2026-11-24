@@ -1,0 +1,43 @@
+name: Workspace watch diagnostic
+
+on:
+  push:
+    branches: ["codex/workspace-watch-windows-diagnostic"]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-watch:
+    runs-on: windows-2022
+    timeout-minutes: 28
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: Ensure MinGW-w64
+        run: |
+          if ! command -v gcc >/dev/null 2>&1; then
+            choco install mingw -y
+            gcc_path="$(find /c/ProgramData/chocolatey/lib/mingw /c/tools/mingw64 /c/mingw64 -type f -name gcc.exe -print -quit 2>/dev/null || true)"
+            test -n "$gcc_path"
+            printf '%s\n' "$(cygpath -m "$(dirname "$gcc_path")")" >> "$GITHUB_PATH"
+          fi
+      - name: Test the published fixture
+        continue-on-error: true
+        run: |
+          test_path=desktop/internal/pluginservice/hostworkspacewatch_test.go
+          trap 'git restore --worktree -- "$test_path"' EXIT
+          git show HEAD~2:"$test_path" > "$test_path"
+          ./scripts/desktop/desktop-go.sh test ./internal/pluginservice -run '^TestWorkspaceWatchUsesNativeEventsAndReleasesOwnedSubscriptions$' -v -count=5 -timeout=4m
+      - name: Test isolated change events and subscription disposal
+        run: |
+          ./scripts/desktop/desktop-go.sh test ./internal/pluginservice -run '^TestWorkspaceWatch' -v -count=20 -timeout=6m
